@@ -13,9 +13,9 @@ from sklearn.pipeline import Pipeline
 
 from .integrity import CheckResult, hard_failure_reasons
 from .model_gate import ModelGateResult
+from .model_registry import CANDIDATE_ARTIFACT_NAME
+from .promotion import PromotionResult
 from .retrain import CandidateResult
-
-CANDIDATE_ARTIFACT_NAME = "candidate"
 
 
 _HARD_DASHBOARD_METRICS = [
@@ -126,4 +126,45 @@ def log_model_gate_result(result: ModelGateResult) -> None:
             "retrain_reason": result.retrain_reason,
         },
         artifact_file="model_gate/decision.json",
+    )
+
+
+def log_promotion_result(
+    result: PromotionResult,
+    *,
+    candidate_version: str,
+    demoted_version: str | None,
+) -> None:
+    mlflow.log_metrics({
+        "rmse_candidate_ref": result.rmse_candidate_ref,
+        "rmse_champion_ref": result.rmse_champion_ref,
+        "rmse_ref_delta_pct": result.rmse_ref_delta_pct,
+        "promotion_min_improvement_pct": result.min_improvement_pct,
+        "promotion_max_ref_regression_pct": result.max_ref_regression_pct,
+    })
+    mlflow.set_tags({
+        "promotion_recommended": "true" if result.promoted else "false",
+        "candidate_version": candidate_version,
+    })
+    mlflow.log_dict(
+        {
+            "rule": "Promote iff P1 (eval valid) & P2 (beats champion) & P3 (no ref regression) & P4 (integrity sanity)",
+            "promoted": result.promoted,
+            "candidate_version": candidate_version,
+            "demoted_version": demoted_version,
+            "rmse_candidate_eval": result.rmse_candidate_eval,
+            "rmse_champion_eval": result.rmse_champion_eval,
+            "rmse_candidate_ref": result.rmse_candidate_ref,
+            "rmse_champion_ref": result.rmse_champion_ref,
+            "rmse_ref_delta_pct": result.rmse_ref_delta_pct,
+            "min_improvement_pct": result.min_improvement_pct,
+            "max_ref_regression_pct": result.max_ref_regression_pct,
+            "integrity_warn": result.integrity_warn,
+            "criteria": [
+                {"name": c.name, "passed": c.passed, "detail": c.detail}
+                for c in result.criteria
+            ],
+            "decision_reason": result.decision_reason,
+        },
+        artifact_file="promotion/decision.json",
     )

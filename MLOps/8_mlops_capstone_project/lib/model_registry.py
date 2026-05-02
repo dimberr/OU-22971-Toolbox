@@ -25,6 +25,7 @@ from typing import cast
 
 
 MODEL_ARTIFACT_NAME = "model"
+CANDIDATE_ARTIFACT_NAME = "candidate"
 CHAMPION_ALIAS = "champion"
 
 _BOOTSTRAP_MAX_DEPTH = 8
@@ -144,6 +145,74 @@ def register_as_champion(
 
     client.set_registered_model_alias(model_name, CHAMPION_ALIAS, new_version)
     return str(new_version)
+
+
+def register_candidate(
+    *,
+    model_name: str,
+    run_id: str,
+    version_tags: dict[str, str],
+    artifact_name: str = CANDIDATE_ARTIFACT_NAME,
+) -> str:
+    """Register the candidate logged in run_id as a new model version.
+
+    Does NOT flip @champion. Tags are applied to the new version.
+    """
+    client = mlflow.MlflowClient()
+    model_uri = f"runs:/{run_id}/{artifact_name}"
+    registered = mlflow.register_model(model_uri=model_uri, name=model_name)
+    new_version = registered.version
+
+    for key, value in version_tags.items():
+        client.set_model_version_tag(model_name, new_version, key, value)
+
+    return str(new_version)
+
+
+def promote_to_champion(
+    *,
+    model_name: str,
+    candidate_version: str,
+    promotion_reason: str,
+) -> str | None:
+    """Flip @champion to candidate_version. Demote previous, retag new.
+
+    Returns the demoted version (None if no previous champion existed).
+    """
+    client = mlflow.MlflowClient()
+    old_version = _current_champion_version(client, model_name)
+
+    if old_version is not None:
+        _demote_previous_champion(client, model_name, old_version)
+
+    promoted_at = datetime.datetime.now(tz=datetime.timezone.utc).isoformat()
+    new_tags = {
+        "role": "champion",
+        "promoted_at": promoted_at,
+        "promotion_reason": promotion_reason,
+        "validation_status": "approved",
+    }
+    for key, value in new_tags.items():
+        client.set_model_version_tag(model_name, candidate_version, key, value)
+
+    client.set_registered_model_alias(model_name, CHAMPION_ALIAS, candidate_version)
+    return old_version
+
+
+def mark_candidate_rejected(
+    *,
+    model_name: str,
+    candidate_version: str,
+    decision_reason: str,
+) -> None:
+    """Tag a registered candidate version as rejected with the reason."""
+    client = mlflow.MlflowClient()
+    rejected_tags = {
+        "validation_status": "rejected",
+        "decision_reason": decision_reason,
+    }
+    for key, value in rejected_tags.items():
+        client.set_model_version_tag(model_name, candidate_version, key, value)
 
 
 def _current_champion_version(client: mlflow.MlflowClient, model_name: str) -> str | None:
