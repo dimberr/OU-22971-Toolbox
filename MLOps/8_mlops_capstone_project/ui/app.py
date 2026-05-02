@@ -297,7 +297,6 @@ def _render_score_button(  # noqa: PLR0913
     )
     if container.button("Score", key=f"score-{path.name}", disabled=disabled, help=help_text):
         params = runner.ScoreParams(
-            reference_path=str(data_dir / settings["reference_file"]),
             batch_path=str(data_dir / path.name),
             model_name=settings["model_name"],
         )

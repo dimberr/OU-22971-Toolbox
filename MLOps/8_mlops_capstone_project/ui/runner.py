@@ -43,7 +43,6 @@ class BootstrapParams:
 
 @dataclass
 class ScoreParams:
-    reference_path: str
     batch_path: str
     model_name: str
 
@@ -90,7 +89,7 @@ def start_score(
         state_dir=state_dir,
         flow_cmd_factory=lambda _run_id: _build_score_cmd(params),
         batch_file=f"(score) {Path(params.batch_path).name}",
-        reference_file=Path(params.reference_path).name,
+        reference_file="@champion",
         params_summary={
             "action": "score",
             "model_name": params.model_name,
@@ -221,7 +220,6 @@ def _build_bootstrap_cmd(params: BootstrapParams) -> list[str]:
 def _build_score_cmd(params: ScoreParams) -> list[str]:
     return [
         "python", "score_batch.py",
-        "--reference-path", params.reference_path,
         "--batch-path", params.batch_path,
         "--model-name", params.model_name,
     ]

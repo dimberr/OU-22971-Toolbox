@@ -4,14 +4,19 @@ Standalone entry point separate from `flow_starter.py` because the goal is
 production scoring (write predictions for downstream use), not the
 gate/retrain decision pipeline.
 
+Self-contained inference: the FeatureSpec (clip bounds + feature column
+order) is read from the same MLflow run that trained the champion, so
+scoring never refits preprocessing from a reference parquet on disk.
+This eliminates any chance of training/serving skew if the reference
+data changes between training and scoring.
+
 Usage:
     python score_batch.py \\
-        --reference-path TLC_Data/green_tripdata_2020-01.parquet \\
-        --batch-path     TLC_Data/green_tripdata_2020-04.parquet \\
-        --model-name     green_taxi_tip_model
+        --batch-path TLC_Data/green_tripdata_2020-04.parquet \\
+        --model-name green_taxi_tip_model
 
 Output:
-    - local file: ui_state/predictions/<run_id>.parquet
+    - local file: ui_state/predictions/<run_id>/predictions.parquet
     - MLflow artifact: predictions.parquet (under the inference run)
     - MLflow metrics: n_rows_input, n_rows_scored, mean_pred, p50_pred, p95_pred
     - MLflow tags: pipeline=capstone_inference, model_version, batch_path
@@ -27,10 +32,14 @@ import mlflow
 import numpy as np
 import pandas as pd
 
-from lib.features import engineer_features, fit_feature_spec
+from lib.features import engineer_features
 from lib.green_taxi_schema import PICKUP_COL
-from lib.helper import init_mlflow, load_batch, load_reference
-from lib.model_registry import champion_version, load_champion_model
+from lib.helper import init_mlflow, load_batch
+from lib.model_registry import (
+    champion_version,
+    get_champion_feature_spec,
+    load_champion_model,
+)
 
 
 PREDICTIONS_ARTIFACT = "predictions.parquet"
@@ -48,10 +57,9 @@ def main() -> None:
         )
     model, _ = load_champion_model(args.model_name)
     assert model is not None  # champion_version above guarantees the alias exists
+    spec = get_champion_feature_spec(args.model_name)
 
-    ref_df = load_reference(args.reference_path)
     batch_df = load_batch(args.batch_path)
-    spec = fit_feature_spec(ref_df)
     x_batch, y_batch = engineer_features(batch_df, spec)
 
     preds = model.predict(x_batch)
@@ -72,7 +80,6 @@ def main() -> None:
             "model_name": args.model_name,
             "model_version": version,
             "batch_path": args.batch_path,
-            "reference_path": args.reference_path,
         })
         mlflow.log_metrics({
             "n_rows_input": float(len(batch_df)),
@@ -144,7 +151,6 @@ def _persist_local_copy(predictions_df: pd.DataFrame, *, run_id: str) -> Path | 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Score a batch with the @champion model.")
-    parser.add_argument("--reference-path", required=True)
     parser.add_argument("--batch-path", required=True)
     parser.add_argument("--model-name", default="green_taxi_tip_model")
     return parser.parse_args()

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import mlflow
+import mlflow.artifacts
 import numpy as np
 import pandas as pd
 from mlflow.exceptions import MlflowException
@@ -22,6 +23,11 @@ from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeRegressor
 from typing import cast
+
+from lib.features import FeatureSpec
+
+
+FEATURE_SPEC_ARTIFACT = "feature_spec.json"
 
 
 MODEL_ARTIFACT_NAME = "model"
@@ -59,6 +65,38 @@ def champion_version(model_name: str) -> str | None:
         return client.get_model_version_by_alias(model_name, CHAMPION_ALIAS).version
     except MlflowException:
         return None
+
+
+def get_champion_feature_spec(model_name: str) -> FeatureSpec:
+    """Download the FeatureSpec that was logged alongside the @champion's training run.
+
+    This is the inference-time counterpart to `mlflow.log_dict(spec.to_dict(),
+    feature_spec.json)` performed at training. Loading the spec from MLflow
+    (instead of refitting it from a reference parquet) guarantees the
+    inference pipeline uses *exactly* the same clip bounds and feature
+    columns the model was trained on -- no training/serving skew possible
+    even if the on-disk reference data drifts.
+
+    Raises RuntimeError with an actionable message if the alias has no
+    source run or the artifact is missing (older models pre-dating this
+    convention).
+    """
+    client = mlflow.MlflowClient()
+    mv = client.get_model_version_by_alias(model_name, CHAMPION_ALIAS)
+    if mv.run_id is None:
+        raise RuntimeError(
+            f"Champion {model_name} v{mv.version} has no source run; "
+            "cannot load feature_spec.json."
+        )
+    try:
+        spec_dict = mlflow.artifacts.load_dict(f"runs:/{mv.run_id}/{FEATURE_SPEC_ARTIFACT}")
+    except (MlflowException, OSError) as exc:
+        raise RuntimeError(
+            f"Champion {model_name} v{mv.version} (run {mv.run_id}) has no "
+            f"{FEATURE_SPEC_ARTIFACT} artifact. Re-bootstrap or retrain so the "
+            "spec is logged alongside the model."
+        ) from exc
+    return FeatureSpec.from_dict(spec_dict)
 
 
 def bootstrap_champion(

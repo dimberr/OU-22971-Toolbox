@@ -83,6 +83,16 @@ class FeatureSpec:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2)
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "FeatureSpec":
+        return cls(
+            feature_cols=list(data["feature_cols"]),
+            clip_bounds={
+                col: (float(bounds[0]), float(bounds[1]))
+                for col, bounds in data["clip_bounds"].items()
+            },
+        )
+
 
 def fit_feature_spec(df_ref: pd.DataFrame) -> FeatureSpec:
     """Fit clip bounds from the reference dataset and return a FeatureSpec.
