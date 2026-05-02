@@ -40,6 +40,13 @@ class BootstrapParams:
     model_name: str
 
 
+@dataclass
+class ScoreParams:
+    reference_path: str
+    batch_path: str
+    model_name: str
+
+
 def start_run(*, project_root: Path, state_dir: Path, params: RunParams) -> state.RunRecord:
     return _start_subprocess(
         project_root=project_root,
@@ -64,6 +71,26 @@ def start_bootstrap(
         batch_file="(bootstrap)",
         reference_file=Path(params.reference_path).name,
         params_summary={"action": "bootstrap", "model_name": params.model_name},
+    )
+
+
+def start_score(
+    *,
+    project_root: Path,
+    state_dir: Path,
+    params: ScoreParams,
+) -> state.RunRecord:
+    return _start_subprocess(
+        project_root=project_root,
+        state_dir=state_dir,
+        flow_cmd=_build_score_cmd(params),
+        batch_file=f"(score) {Path(params.batch_path).name}",
+        reference_file=Path(params.reference_path).name,
+        params_summary={
+            "action": "score",
+            "model_name": params.model_name,
+            "batch_path": params.batch_path,
+        },
     )
 
 
@@ -179,6 +206,15 @@ def _build_bootstrap_cmd(params: BootstrapParams) -> list[str]:
     return [
         "python", "bootstrap.py",
         "--reference-path", params.reference_path,
+        "--model-name", params.model_name,
+    ]
+
+
+def _build_score_cmd(params: ScoreParams) -> list[str]:
+    return [
+        "python", "score_batch.py",
+        "--reference-path", params.reference_path,
+        "--batch-path", params.batch_path,
         "--model-name", params.model_name,
     ]
 

@@ -38,6 +38,10 @@ MLFLOW_UI_URL_DEFAULT = "http://localhost:5000"
 
 STATUS_ICON = {"running": "...", "success": "OK", "failed": "FAIL"}
 
+_RUN_IN_PROGRESS_HELP = "A flow is already running"
+_NO_CHAMPION_HELP = "Bootstrap a champion first"
+_REFERENCE_FILE_HELP = "This file is the reference; pick a different batch"
+
 
 def _data_dir() -> Path:
     return Path(os.environ.get("DATA_DIR", str(DEFAULT_DATA_DIR)))
@@ -68,12 +72,22 @@ def _last_status_for(file_name: str, history: list[state.RunRecord]) -> tuple[st
 
 def _run_button_help(*, is_running: bool, is_reference: bool, has_champion: bool) -> str:
     if is_running:
-        return "A flow is already running"
+        return _RUN_IN_PROGRESS_HELP
     if not has_champion:
-        return "Bootstrap a champion first"
+        return _NO_CHAMPION_HELP
     if is_reference:
-        return "This file is the reference; pick a different batch"
+        return _REFERENCE_FILE_HELP
     return "Run the full pipeline on this batch"
+
+
+def _score_button_help(*, is_running: bool, is_reference: bool, has_champion: bool) -> str:
+    if is_running:
+        return _RUN_IN_PROGRESS_HELP
+    if not has_champion:
+        return _NO_CHAMPION_HELP
+    if is_reference:
+        return _REFERENCE_FILE_HELP
+    return "Score this batch with the @champion model and log predictions.parquet"
 
 
 def _check_champion_status(model_name: str) -> str | None:
@@ -164,7 +178,7 @@ def _render_champion_section(
         f"Bootstrap one from the reference file (`{reference_file}`) before running batches."
     )
     bootstrap_help = (
-        "A flow is already running" if is_running
+        _RUN_IN_PROGRESS_HELP if is_running
         else f"Train initial model on `{reference_file}` and register as @champion"
     )
     if st.button(
@@ -199,8 +213,8 @@ def _render_batches_table(
         st.info(f"No `green_tripdata_*.parquet` files found in `{data_dir}`.")
         return
 
-    header = st.columns([3, 1, 2, 2, 2])
-    for col, label in zip(header, ["File", "Size (MB)", "Modified", "Last status", "Action"]):
+    header = st.columns([3, 1, 2, 2, 3])
+    for col, label in zip(header, ["File", "Size (MB)", "Modified", "Last status", "Actions"]):
         col.markdown(f"**{label}**")
 
     for path in parquet_files:
@@ -212,22 +226,83 @@ def _render_batches_table(
         if last_at:
             status_text += f"  ({last_at[:16]})"
 
-        cols = st.columns([3, 1, 2, 2, 2])
+        cols = st.columns([3, 1, 2, 2, 3])
         cols[0].write(f"`{path.name}`" + (" *(reference)*" if is_reference else ""))
         cols[1].write(f"{size_mb:.1f}")
         cols[2].write(modified)
         cols[3].write(status_text)
 
-        button_disabled = is_running or is_reference or not has_champion
-        button_help = _run_button_help(
+        action_cols = cols[4].columns(2)
+        _render_run_button(
+            container=action_cols[0],
+            path=path,
             is_running=is_running,
             is_reference=is_reference,
             has_champion=has_champion,
+            settings=settings,
+            data_dir=data_dir,
+            state_dir=state_dir,
         )
-        if cols[4].button("Run flow", key=f"run-{path.name}", disabled=button_disabled, help=button_help):
-            params = _build_run_params(data_dir=data_dir, settings=settings, batch_file=path.name)
-            runner.start_run(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
-            st.rerun()
+        _render_score_button(
+            container=action_cols[1],
+            path=path,
+            is_running=is_running,
+            is_reference=is_reference,
+            has_champion=has_champion,
+            settings=settings,
+            data_dir=data_dir,
+            state_dir=state_dir,
+        )
+
+
+def _render_run_button(  # noqa: PLR0913
+    *,
+    container,
+    path: Path,
+    is_running: bool,
+    is_reference: bool,
+    has_champion: bool,
+    settings: dict,
+    data_dir: Path,
+    state_dir: Path,
+) -> None:
+    disabled = is_running or is_reference or not has_champion
+    help_text = _run_button_help(
+        is_running=is_running,
+        is_reference=is_reference,
+        has_champion=has_champion,
+    )
+    if container.button("Run flow", key=f"run-{path.name}", disabled=disabled, help=help_text):
+        params = _build_run_params(data_dir=data_dir, settings=settings, batch_file=path.name)
+        runner.start_run(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
+        st.rerun()
+
+
+def _render_score_button(  # noqa: PLR0913
+    *,
+    container,
+    path: Path,
+    is_running: bool,
+    is_reference: bool,
+    has_champion: bool,
+    settings: dict,
+    data_dir: Path,
+    state_dir: Path,
+) -> None:
+    disabled = is_running or is_reference or not has_champion
+    help_text = _score_button_help(
+        is_running=is_running,
+        is_reference=is_reference,
+        has_champion=has_champion,
+    )
+    if container.button("Score", key=f"score-{path.name}", disabled=disabled, help=help_text):
+        params = runner.ScoreParams(
+            reference_path=str(data_dir / settings["reference_file"]),
+            batch_path=str(data_dir / path.name),
+            model_name=settings["model_name"],
+        )
+        runner.start_score(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
+        st.rerun()
 
 
 @st.fragment(run_every=2.0)
@@ -297,9 +372,10 @@ def main() -> None:
     st.title("Green Taxi tip prediction - MLOps capstone")
     st.markdown(
         "Drop a new `green_tripdata_YYYY-MM.parquet` into the data folder; "
-        "it will appear below. Click **Run flow** to execute integrity gate, "
+        "it will appear below. **Run flow** executes the integrity gate, "
         "feature engineering, performance gate, retrain (conditional), and "
-        f"promotion. Evidence lands in [MLflow]({_mlflow_ui_url()})."
+        "promotion. **Score** runs batch inference with the active champion "
+        f"and logs `predictions.parquet`. Evidence lands in [MLflow]({_mlflow_ui_url()})."
     )
 
     runner.finalize_if_done(state_dir)
