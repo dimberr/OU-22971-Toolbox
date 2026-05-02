@@ -26,6 +26,7 @@ from ._base import CheckResult
 
 _NEG_DURATION_TOLERANCE = 0.05    # >5% rows with dropoff < pickup -> hard fail
 _IMPOSSIBLE_VALUE_TOLERANCE = 0.01  # >1% rows with negative trip_distance -> hard fail
+_DATETIME_NAN_TOLERANCE = 0.01    # >1% rows with unparseable pickup/dropoff -> hard fail
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +73,20 @@ def _reason_negative_duration(metrics: dict[str, float]) -> str | None:
     return f"duration_neg_frac={neg_dur:.3%} exceeds tolerance={_NEG_DURATION_TOLERANCE:.0%}"
 
 
+def _reason_unparseable_datetimes(metrics: dict[str, float]) -> str | None:
+    nan_frac = metrics.get("duration_nan_frac", 0.0)
+    if nan_frac <= _DATETIME_NAN_TOLERANCE:
+        return None
+    return f"duration_nan_frac={nan_frac:.3%} exceeds tolerance={_DATETIME_NAN_TOLERANCE:.0%}"
+
+
 def hard_failure_reasons(result: CheckResult) -> list[str]:
     candidates = [
         _reason_missing_cols(result.metrics, result.tables),
         _reason_target_fully_missing(result.tables),
         _reason_impossible_trip_distance(result.tables),
         _reason_negative_duration(result.metrics),
+        _reason_unparseable_datetimes(result.metrics),
     ]
     return [r for r in candidates if r is not None]
 

@@ -55,5 +55,5 @@ def log_integrity_result(result: CheckResult, check: str) -> None:
     decision = _hard_decision(result) if check == "hard" else _soft_decision(result)
     mlflow.log_dict(decision, artifact_file=f"integrity/{check}/decision.json")
 
-    if check == "soft" and result.warnings:
-        mlflow.set_tag("integrity_warn", "true")
+    if check == "soft":
+        mlflow.set_tag("integrity_warn", "true" if result.warnings else "false")

@@ -46,7 +46,9 @@ class MLFlowCapstoneFlow(FlowSpec):
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
             log_integrity_result(hard_check_result, check="hard")
 
-        self.next(self.soft_integrity_gate if hard_is_ok(hard_check_result) else self.end)
+        ok = hard_is_ok(hard_check_result)
+        self.batch_rejected = not ok
+        self.next(self.soft_integrity_gate if ok else self.end)
 
     @step
     def soft_integrity_gate(self):
@@ -67,7 +69,10 @@ class MLFlowCapstoneFlow(FlowSpec):
     
     @step
     def end(self):
-        print("Batch data failed integrity checks. Ending flow.")
+        if self.batch_rejected:
+            print("Batch data failed hard integrity checks. Flow ended without evaluation.")
+        else:
+            print("Flow complete.")
 
 
 if __name__ == "__main__":
