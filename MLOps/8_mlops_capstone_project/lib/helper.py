@@ -1,12 +1,17 @@
 import contextlib
+import os
 from collections.abc import Iterator
 
 import mlflow
 import pandas as pd
 
 
+DEFAULT_MLFLOW_TRACKING_URI = "http://localhost:5000"
+
+
 def init_mlflow(model_name: str) -> None:
-    mlflow.set_tracking_uri("http://localhost:5000")
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_TRACKING_URI)
+    mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(model_name)
 
 

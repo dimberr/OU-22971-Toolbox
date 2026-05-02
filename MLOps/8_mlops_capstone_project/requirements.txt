@@ -1,0 +1,11 @@
+metaflow==2.19.23
+mlflow==3.11.1
+nannyml==0.13.1
+numpy==2.4.4
+pandas==2.3.3
+pyarrow==23.0.1
+scikit-learn==1.8.0
+xgboost==2.1.4
+
+# UI
+streamlit==1.57.0

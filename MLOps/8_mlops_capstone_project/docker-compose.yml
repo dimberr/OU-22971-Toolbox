@@ -1,0 +1,36 @@
+services:
+  mlflow:
+    build: .
+    image: capstone:latest
+    container_name: capstone-mlflow
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow_tracking:/mlflow
+
+  ui:
+    build: .
+    image: capstone:latest
+    container_name: capstone-ui
+    init: true
+    depends_on:
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DATA_DIR: /data
+      UI_STATE_DIR: /app/ui_state
+      USERNAME: capstone
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./TLC_Data:/data
+      - ./mlflow_tracking:/mlflow
+      - ./ui_state:/app/ui_state
+      - ./metaflow_state:/app/.metaflow
