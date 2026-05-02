@@ -13,7 +13,7 @@ services:
     environment:
       GIT_PYTHON_REFRESH: quiet
     ports:
-      - "5000:5000"
+      - "127.0.0.1:5000:5000"
     volumes:
       - ./mlflow_tracking:/mlflow
 
@@ -32,7 +32,7 @@ services:
       PYTHONPATH: /app
       GIT_PYTHON_REFRESH: quiet
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     volumes:
       - ./TLC_Data:/data
       - ./mlflow_tracking:/mlflow
