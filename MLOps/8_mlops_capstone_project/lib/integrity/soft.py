@@ -1,8 +1,10 @@
 """Soft (NannyML-based) integrity checks for the green taxi raw batch.
 
-Two NannyML calculators run side-by-side:
+Three NannyML calculators run side-by-side:
 - MissingValuesCalculator: detects missingness spike vs reference.
 - UnseenValuesCalculator: detects categorical values not seen in reference.
+- UnivariateDriftCalculator: detects per-column distribution drift vs reference
+  (Jensen-Shannon distance for both continuous and categorical columns).
 
 Output is packed into a CheckResult identical in shape to the hard gate:
 - metrics: alert summary counts.
@@ -37,6 +39,14 @@ _SOFT_UNSEEN_COLS: tuple[str, ...] = (
     "PULocationID", "DOLocationID",
 )
 
+# Continuous numeric columns NannyML monitors for distribution drift.
+# Categorical drift uses _SOFT_UNSEEN_COLS (same list, cast to category dtype).
+_SOFT_DRIFT_CONT_COLS: tuple[str, ...] = (
+    "VendorID", "passenger_count", "trip_distance",
+    "fare_amount", "extra", "mta_tax", "tip_amount", "tolls_amount",
+    "improvement_surcharge", "total_amount", "congestion_surcharge",
+)
+
 
 def _filter_present(cols: tuple[str, ...], *frames: pd.DataFrame) -> list[str]:
     return [c for c in cols if all(c in f.columns for f in frames)]
@@ -62,6 +72,20 @@ def _summarize_alerts(result_df: pd.DataFrame) -> tuple[int, list[str]]:
         return 0, []
     alerts = result_df.xs("alert", axis=1, level=1)
     alerting = sorted([str(c) for c in alerts.columns if bool(alerts[c].any())])
+    total = int(alerts.sum().sum())
+    return total, alerting
+
+
+def _summarize_drift_alerts(result_df: pd.DataFrame) -> tuple[int, list[str]]:
+    # UnivariateDriftCalculator's columns are a 3-level MultiIndex:
+    # (column_name, method, attribute). Alerts live on the last level.
+    if not isinstance(result_df.columns, pd.MultiIndex):
+        return 0, []
+    alerts = result_df.xs("alert", axis=1, level=-1)
+    alerting = sorted({
+        str(col) for col, method in alerts.columns
+        if bool(alerts[(col, method)].any())
+    })
     total = int(alerts.sum().sum())
     return total, alerting
 
@@ -134,6 +158,45 @@ def _run_unseen_values_calc(
     return metrics, tables, warnings
 
 
+def _run_univariate_drift_calc(
+    *,
+    reference: pd.DataFrame,
+    batch: pd.DataFrame,
+    timestamp_col: str,
+    chunk_period: str,
+) -> tuple[dict[str, float], dict[str, pd.DataFrame], list[str]]:
+    cont_cols = _filter_present(_SOFT_DRIFT_CONT_COLS, reference, batch)
+    cat_cols = _filter_present(_SOFT_UNSEEN_COLS, reference, batch)
+    column_names = cont_cols + cat_cols
+    if not column_names:
+        return {}, {}, []
+
+    ref_cat = _cast_categorical(reference, cat_cols)
+    batch_cat = _cast_categorical(batch, cat_cols)
+
+    calc = nml.UnivariateDriftCalculator(
+        column_names=column_names,
+        timestamp_column_name=timestamp_col,
+        chunk_period=chunk_period,
+        continuous_methods=["jensen_shannon"],
+        categorical_methods=["jensen_shannon"],
+    )
+    calc.fit(ref_cat)
+    result = calc.calculate(batch_cat).filter(period="analysis").to_df()
+
+    total_alerts, alerting_cols = _summarize_drift_alerts(result)
+    metrics = {
+        "soft_drift_alert_chunks": float(total_alerts),
+        "soft_drift_alert_cols": float(len(alerting_cols)),
+    }
+    tables = {
+        "drift_per_chunk": _flatten_columns(result),
+        "drift_alert_columns": pd.DataFrame({"column": alerting_cols}),
+    }
+    warnings = [f"univariate_drift: column '{c}' alerted vs reference" for c in alerting_cols]
+    return metrics, tables, warnings
+
+
 def run_soft_integrity_checks(
     *,
     reference: pd.DataFrame,
@@ -145,7 +208,12 @@ def run_soft_integrity_checks(
     tables: dict[str, pd.DataFrame] = {}
     warnings: list[str] = []
 
-    for run in (_run_missing_values_calc, _run_unseen_values_calc):
+    calculators = (
+        _run_missing_values_calc,
+        _run_unseen_values_calc,
+        _run_univariate_drift_calc,
+    )
+    for run in calculators:
         m, t, w = run(
             reference=reference,
             batch=batch,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import mlflow
 
 from .integrity import CheckResult, hard_failure_reasons
+from .model_gate import ModelGateResult
 
 
 _HARD_DASHBOARD_METRICS = [
@@ -24,6 +25,8 @@ _SOFT_DASHBOARD_METRICS = [
     "soft_missing_alert_cols",
     "soft_unseen_alert_chunks",
     "soft_unseen_alert_cols",
+    "soft_drift_alert_chunks",
+    "soft_drift_alert_cols",
 ]
 
 
@@ -57,3 +60,28 @@ def log_integrity_result(result: CheckResult, check: str) -> None:
 
     if check == "soft":
         mlflow.set_tag("integrity_warn", "true" if result.warnings else "false")
+
+
+def log_model_gate_result(result: ModelGateResult) -> None:
+    mlflow.log_metrics({
+        "rmse_champion": result.rmse_champion,
+        "rmse_baseline": result.rmse_baseline,
+        "rmse_increase_pct": result.rmse_increase_pct,
+        "model_gate_alert_chunks": float(result.alert_chunks),
+        "model_gate_total_chunks": float(result.total_chunks),
+    })
+    mlflow.set_tag("retrain_recommended", "true" if result.retrain_needed else "false")
+    mlflow.log_table(result.per_chunk, artifact_file="model_gate/perf_per_chunk.json")
+    mlflow.log_dict(
+        {
+            "rule": "NannyML PerformanceCalculator (RMSE) with default 3-sigma threshold",
+            "rmse_champion": result.rmse_champion,
+            "rmse_baseline": result.rmse_baseline,
+            "rmse_increase_pct": result.rmse_increase_pct,
+            "alert_chunks": result.alert_chunks,
+            "total_chunks": result.total_chunks,
+            "retrain_needed": result.retrain_needed,
+            "retrain_reason": result.retrain_reason,
+        },
+        artifact_file="model_gate/decision.json",
+    )

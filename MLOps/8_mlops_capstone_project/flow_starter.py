@@ -4,7 +4,7 @@ from metaflow.parameters import Parameter
 from metaflow.decorators import step
 
 from lib.integrity import hard_is_ok, run_hard_integrity_checks, run_soft_integrity_checks
-from lib.mlflow_log import log_integrity_result
+from lib.mlflow_log import log_integrity_result, log_model_gate_result
 from lib.green_taxi_schema import GREEN_TAXI_SCHEMA
 from lib.helper import flow_run, init_mlflow, load_batch, load_reference
 from lib.features import FeatureSpec, engineer_features, fit_feature_spec
@@ -12,6 +12,7 @@ from lib.model_registry import (
     bootstrap_champion,
     load_champion_model,
 )
+from lib.model_gate import RMSE_REF_METRIC, evaluate_champion, get_champion_baseline_rmse
 
 
 class MLFlowCapstoneFlow(FlowSpec):
@@ -107,7 +108,27 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def model_gate(self):
-        # TODO: Step E - evaluate champion on batch, decide whether to retrain.
+        rmse_baseline = get_champion_baseline_rmse(str(self.model_name), str(self.champion_version))
+
+        if rmse_baseline is None:
+            raise RuntimeError(
+                f"Champion version {self.champion_version} has no '{RMSE_REF_METRIC}' "
+                "metric in MLflow. Re-bootstrap or manually log it."
+            )
+
+        result = evaluate_champion(
+            model=self.champion_model,
+            X_ref=self.X_ref,
+            y_ref=self.y_ref,
+            X_batch=self.X_batch,
+            y_batch=self.y_batch,
+            rmse_baseline=rmse_baseline,
+        )
+
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            log_model_gate_result(result)
+
+        self.retrain_needed = result.retrain_needed
         self.next(self.end)
 
     @step

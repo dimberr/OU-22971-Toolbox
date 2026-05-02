@@ -17,8 +17,8 @@ import pandas as pd
 from mlflow.exceptions import MlflowException
 from mlflow.sklearn import load_model as load_sklearn_model
 from mlflow.sklearn import log_model as log_sklearn_model
-from sklearn.base import BaseEstimator
 from sklearn.impute import SimpleImputer
+from sklearn.metrics import mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.tree import DecisionTreeRegressor
 from typing import cast
@@ -33,7 +33,7 @@ _BOOTSTRAP_RANDOM_STATE = 0
 _BOOTSTRAP_CCP_ALPHA = 0.0  # 0.0 = no cost-complexity pruning
 
 
-def load_champion_model(model_name: str) -> tuple[BaseEstimator, str] | tuple[None, None]:
+def load_champion_model(model_name: str) -> tuple[Pipeline, str] | tuple[None, None]:
     """Try to load the @champion model version from the MLflow registry.
 
     Returns (model, version_number) if the alias exists, or (None, None) if not.
@@ -42,7 +42,7 @@ def load_champion_model(model_name: str) -> tuple[BaseEstimator, str] | tuple[No
     try:
         alias_mv = client.get_model_version_by_alias(model_name, CHAMPION_ALIAS)
         loaded = load_sklearn_model(f"models:/{model_name}@{CHAMPION_ALIAS}")
-        return cast(BaseEstimator, loaded), alias_mv.version
+        return cast(Pipeline, loaded), alias_mv.version
     except MlflowException:
         return None, None
 
@@ -54,7 +54,7 @@ def bootstrap_champion(
     model_name: str,
     run_id: str,
     reference_path: str,
-) -> tuple[BaseEstimator, str]:
+) -> tuple[Pipeline, str]:
     """Train on reference, log to the existing run, register, and set @champion.
 
     Returns (fitted_model, version_number).
@@ -62,6 +62,8 @@ def bootstrap_champion(
     """
     model = build_model()
     model.fit(X_ref, y_ref)
+
+    rmse_ref = float(np.sqrt(mean_squared_error(y_ref, model.predict(X_ref))))
 
     with mlflow.start_run(run_id=run_id):
         log_sklearn_model(sk_model=model, name=MODEL_ARTIFACT_NAME, input_example=X_ref.head(5))
@@ -71,6 +73,7 @@ def bootstrap_champion(
             "bootstrap_random_state": _BOOTSTRAP_RANDOM_STATE,
             "bootstrap_ccp_alpha": _BOOTSTRAP_CCP_ALPHA,
         })
+        mlflow.log_metric("rmse_ref", rmse_ref)
         mlflow.set_tag("bootstrap", "true")
 
         version = register_as_champion(
