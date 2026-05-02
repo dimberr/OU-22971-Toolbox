@@ -284,8 +284,8 @@ def _check_zone_validity(
     if not zone_lookup_path.exists():
         return {}
 
-    zones = pd.read_csv(zone_lookup_path)
-    if "LocationID" not in zones.columns:
+    zones = _load_zone_lookup(zone_lookup_path)
+    if zones is None or "LocationID" not in zones.columns:
         return {}
 
     loc_numeric: pd.Series = pd.to_numeric(zones["LocationID"], errors="coerce")  # type: ignore[assignment]
@@ -301,6 +301,20 @@ def _check_zone_validity(
         metrics[f"{col}_unknown_frac"] = float(bad.mean()) if len(s) else 0.0
 
     return metrics
+
+
+def _load_zone_lookup(path: Path) -> pd.DataFrame | None:
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    if suffix in (".geojson", ".json"):
+        import json
+        data = json.loads(path.read_text())
+        if data.get("type") != "FeatureCollection":
+            return None
+        rows = [feat.get("properties", {}) for feat in data.get("features", [])]
+        return pd.DataFrame(rows)
+    return None
 
 
 # ---------------------------------------------------------------------------

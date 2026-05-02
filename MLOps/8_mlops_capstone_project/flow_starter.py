@@ -74,7 +74,11 @@ class MLFlowCapstoneFlow(FlowSpec):
 
         ok = hard_is_ok(hard_check_result)
         self.batch_rejected = not ok
-        self.next(self.soft_integrity_gate if ok else self.end)
+        self.integrity_decision = "pass" if ok else "fail"
+        self.next(
+            {"pass": self.soft_integrity_gate, "fail": self.end},  # pyright: ignore[reportArgumentType]
+            condition="integrity_decision",
+        )
 
     @step
     def soft_integrity_gate(self):
@@ -168,7 +172,11 @@ class MLFlowCapstoneFlow(FlowSpec):
 
         self.retrain_needed = result.retrain_needed
         self.rmse_champion_eval = result.rmse_champion
-        self.next(self.retrain if result.retrain_needed else self.end)
+        self.retrain_decision = "retrain" if result.retrain_needed else "skip"
+        self.next(
+            {"retrain": self.retrain, "skip": self.end},  # pyright: ignore[reportArgumentType]
+            condition="retrain_decision",
+        )
 
     @step
     def retrain(self):
