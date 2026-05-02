@@ -342,6 +342,8 @@ def _render_history(history: list[state.RunRecord]) -> None:
             "started": r.started_at,
             "finished": r.finished_at or "",
             "status": f"{STATUS_ICON.get(r.status, '?')} {r.status}",
+            "retrain?": _retrain_label(r),
+            "outcome": _outcome_label(r),
             "exit": r.exit_code if r.exit_code is not None else "",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -351,8 +353,27 @@ def _render_history(history: list[state.RunRecord]) -> None:
         chosen = st.selectbox("Run id", options=run_ids, key="hist-log-select")
         if chosen:
             chosen_record = next(r for r in history if r.id == chosen)
+            if chosen_record.result and chosen_record.result.get("summary"):
+                st.info(chosen_record.result["summary"])
             log_text = runner.read_log_tail(Path(chosen_record.log_path), max_chars=200_000)
             st.code(log_text or "(no log available)", language="bash")
+
+
+def _retrain_label(record: state.RunRecord) -> str:
+    if record.result is None:
+        return "—"
+    val = record.result.get("retrain_needed")
+    if val is True:
+        return "yes"
+    if val is False:
+        return "no"
+    return "—"
+
+
+def _outcome_label(record: state.RunRecord) -> str:
+    if record.result is None:
+        return "—"
+    return str(record.result.get("outcome", "—"))
 
 
 def main() -> None:

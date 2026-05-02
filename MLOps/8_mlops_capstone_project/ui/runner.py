@@ -15,6 +15,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -48,10 +49,14 @@ class ScoreParams:
 
 
 def start_run(*, project_root: Path, state_dir: Path, params: RunParams) -> state.RunRecord:
+    def factory(run_id: str) -> list[str]:
+        result_path = state.result_path_for(state_dir, run_id)
+        return _build_flow_cmd(params, ui_result_path=str(result_path))
+
     return _start_subprocess(
         project_root=project_root,
         state_dir=state_dir,
-        flow_cmd=_build_flow_cmd(params),
+        flow_cmd_factory=factory,
         batch_file=Path(params.batch_path).name,
         reference_file=Path(params.reference_path).name,
         params_summary=_params_summary(params),
@@ -67,7 +72,7 @@ def start_bootstrap(
     return _start_subprocess(
         project_root=project_root,
         state_dir=state_dir,
-        flow_cmd=_build_bootstrap_cmd(params),
+        flow_cmd_factory=lambda _run_id: _build_bootstrap_cmd(params),
         batch_file="(bootstrap)",
         reference_file=Path(params.reference_path).name,
         params_summary={"action": "bootstrap", "model_name": params.model_name},
@@ -83,7 +88,7 @@ def start_score(
     return _start_subprocess(
         project_root=project_root,
         state_dir=state_dir,
-        flow_cmd=_build_score_cmd(params),
+        flow_cmd_factory=lambda _run_id: _build_score_cmd(params),
         batch_file=f"(score) {Path(params.batch_path).name}",
         reference_file=Path(params.reference_path).name,
         params_summary={
@@ -98,7 +103,7 @@ def _start_subprocess(
     *,
     project_root: Path,
     state_dir: Path,
-    flow_cmd: list[str],
+    flow_cmd_factory: Callable[[str], list[str]],
     batch_file: str,
     reference_file: str,
     params_summary: dict[str, str],
@@ -108,6 +113,7 @@ def _start_subprocess(
     run_id = uuid.uuid4().hex[:8]
     log_path = state.log_path_for(state_dir, run_id)
     exit_code_path = _exit_code_path(state_dir, run_id)
+    flow_cmd = flow_cmd_factory(run_id)
 
     log_handle = log_path.open("w", buffering=1)
     log_handle.write(f"$ {' '.join(flow_cmd)}\n\n")
@@ -165,6 +171,7 @@ def finalize_if_done(state_dir: Path) -> state.RunRecord | None:
     current.exit_code = exit_code
     current.status = "success" if exit_code == 0 else "failed"
     current.pid = None
+    current.result = state.read_result(state_dir, current.id)
 
     state.append_history(state_dir, current)
     state.clear_current(state_dir)
@@ -185,7 +192,7 @@ def read_log_tail(log_path: Path, max_chars: int = 20_000) -> str:
     return text if len(text) <= max_chars else text[-max_chars:]
 
 
-def _build_flow_cmd(params: RunParams) -> list[str]:
+def _build_flow_cmd(params: RunParams, *, ui_result_path: str) -> list[str]:
     cmd = [
         "python", "flow_starter.py", "run",
         "--reference-path", params.reference_path,
@@ -196,6 +203,7 @@ def _build_flow_cmd(params: RunParams) -> list[str]:
         "--batch-eval-pct", str(params.batch_eval_pct),
         "--min-improvement-pct", str(params.min_improvement_pct),
         "--max-ref-regression-pct", str(params.max_ref_regression_pct),
+        "--ui-result-path", ui_result_path,
     ]
     if params.taxi_zone_lookup_path:
         cmd += ["--taxi-zone-lookup-path", params.taxi_zone_lookup_path]

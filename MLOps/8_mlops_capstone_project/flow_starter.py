@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import cast
 
@@ -40,6 +41,9 @@ class MLFlowCapstoneFlow(FlowSpec):
     batch_eval_pct = Parameter("batch-eval-pct", default=0.2, required=False)
     min_improvement_pct = Parameter("min-improvement-pct", default=0.01, required=False)
     max_ref_regression_pct = Parameter("max-ref-regression-pct", default=0.01, required=False)
+    # Optional sidecar file the UI runner reads after the flow exits to populate
+    # the history table (retrain decision, promotion outcome, etc.).
+    ui_result_path = Parameter("ui-result-path", default=None, required=False)
 
     @step
     def start(self):
@@ -260,37 +264,76 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def end(self):
+        result = self._build_ui_result()
+        print(result["summary"])
+        self._maybe_write_ui_result(result)
+
+    def _build_ui_result(self) -> dict:
         if self.batch_rejected:
-            print(
-                "Batch rejected by hard integrity checks. "
-                "No evaluation, retrain, or promotion performed."
-            )
-            return
+            return {
+                "outcome": "batch_rejected",
+                "retrain_needed": None,
+                "promoted": None,
+                "summary": (
+                    "Batch rejected by hard integrity checks. "
+                    "No evaluation, retrain, or promotion performed."
+                ),
+            }
 
         if not self.retrain_needed:
-            print(
-                "Champion still healthy; no retrain triggered. "
-                f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-                f"(integrity_warn={self.integrity_warn})."
-            )
-            return
+            return {
+                "outcome": "no_retrain",
+                "retrain_needed": False,
+                "promoted": False,
+                "rmse_champion": float(self.rmse_champion_eval),
+                "integrity_warn": bool(self.integrity_warn),
+                "summary": (
+                    "Champion still healthy; no retrain triggered. "
+                    f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
+                    f"(integrity_warn={self.integrity_warn})."
+                ),
+            }
 
         if self.promoted:
-            print(
-                f"Candidate v{self.candidate_version} PROMOTED to @champion. "
+            return {
+                "outcome": "promoted",
+                "retrain_needed": True,
+                "promoted": True,
+                "candidate_version": str(self.candidate_version),
+                "rmse_champion": float(self.rmse_champion_eval),
+                "rmse_candidate": float(self.candidate_rmse),
+                "rmse_delta_pct": float(self.candidate_rmse_delta_pct),
+                "summary": (
+                    f"Candidate v{self.candidate_version} PROMOTED to @champion. "
+                    f"rmse_candidate={self.candidate_rmse:.4f} vs "
+                    f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
+                    f"(delta={self.candidate_rmse_delta_pct:+.2f}%)."
+                ),
+            }
+
+        return {
+            "outcome": "candidate_rejected",
+            "retrain_needed": True,
+            "promoted": False,
+            "candidate_version": str(self.candidate_version),
+            "rmse_champion": float(self.rmse_champion_eval),
+            "rmse_candidate": float(self.candidate_rmse),
+            "rmse_delta_pct": float(self.candidate_rmse_delta_pct),
+            "summary": (
+                f"Candidate v{self.candidate_version} registered but REJECTED for promotion. "
                 f"rmse_candidate={self.candidate_rmse:.4f} vs "
                 f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-                f"(delta={self.candidate_rmse_delta_pct:+.2f}%)."
-            )
-            return
+                f"(delta={self.candidate_rmse_delta_pct:+.2f}%). "
+                "Champion alias unchanged."
+            ),
+        }
 
-        print(
-            f"Candidate v{self.candidate_version} registered but REJECTED for promotion. "
-            f"rmse_candidate={self.candidate_rmse:.4f} vs "
-            f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-            f"(delta={self.candidate_rmse_delta_pct:+.2f}%). "
-            "Champion alias unchanged."
-        )
+    def _maybe_write_ui_result(self, result: dict) -> None:
+        if not self.ui_result_path:
+            return
+        path = Path(str(self.ui_result_path))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

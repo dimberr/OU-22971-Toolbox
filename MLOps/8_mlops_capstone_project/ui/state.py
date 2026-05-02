@@ -4,9 +4,12 @@ All UI state lives on disk under UI_STATE_DIR so it survives Streamlit
 script reruns (which spawn fresh interpreters) and container restarts.
 
 Files:
-- runs.json       : list of finished runs (most recent first), bounded.
-- current.json    : metadata of the currently-running flow (deleted on finalize).
-- logs/<id>.log   : stdout/stderr of each flow run.
+- runs.json         : list of finished runs (most recent first), bounded.
+- current.json      : metadata of the currently-running flow (deleted on finalize).
+- logs/<id>.log     : stdout/stderr of each flow run.
+- results/<id>.json : structured outcome the flow's end step writes,
+                      consumed by the runner on finalize (retrain
+                      decision, promotion, summary).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from pathlib import Path
 _HISTORY_FILE = "runs.json"
 _CURRENT_FILE = "current.json"
 _LOGS_DIR = "logs"
+_RESULTS_DIR = "results"
 _HISTORY_LIMIT = 50
 
 
@@ -37,6 +41,7 @@ class RunRecord:
     log_path: str = ""
     pid: int | None = None
     params: dict[str, str] = field(default_factory=dict)
+    result: dict | None = None
 
 
 def utc_now_iso() -> str:
@@ -46,10 +51,25 @@ def utc_now_iso() -> str:
 def ensure_state_dir(state_dir: Path) -> None:
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / _LOGS_DIR).mkdir(parents=True, exist_ok=True)
+    (state_dir / _RESULTS_DIR).mkdir(parents=True, exist_ok=True)
 
 
 def log_path_for(state_dir: Path, run_id: str) -> Path:
     return state_dir / _LOGS_DIR / f"{run_id}.log"
+
+
+def result_path_for(state_dir: Path, run_id: str) -> Path:
+    return state_dir / _RESULTS_DIR / f"{run_id}.json"
+
+
+def read_result(state_dir: Path, run_id: str) -> dict | None:
+    path = result_path_for(state_dir, run_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
 
 
 def load_history(state_dir: Path) -> list[RunRecord]:
