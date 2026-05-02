@@ -7,6 +7,7 @@ from lib.integrity import hard_is_ok, run_hard_integrity_checks, run_soft_integr
 from lib.mlflow_log import log_integrity_result
 from lib.green_taxi_schema import GREEN_TAXI_SCHEMA
 from lib.helper import flow_run, init_mlflow, load_batch, load_reference
+from lib.features import FeatureSpec, engineer_features, fit_feature_spec
 
 
 class MLFlowCapstoneFlow(FlowSpec):
@@ -59,6 +60,18 @@ class MLFlowCapstoneFlow(FlowSpec):
 
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
             log_integrity_result(soft_check_result, check="soft")
+
+        self.next(self.feature_engineering)
+
+    @step
+    def feature_engineering(self):
+        self.feature_spec: FeatureSpec = fit_feature_spec(self.ref)
+
+        self.X_ref, self.y_ref = engineer_features(self.ref, self.feature_spec)
+        self.X_batch, self.y_batch = engineer_features(self.batch, self.feature_spec)
+
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            mlflow.log_dict(self.feature_spec.to_dict(), "feature_spec.json")
 
         self.next(self.load_champion)
 

@@ -16,6 +16,12 @@ PICKUP_COL = "lpep_pickup_datetime"
 DROPOFF_COL = "lpep_dropoff_datetime"
 TARGET_COL = "tip_amount"
 TRIP_DISTANCE_COL = "trip_distance"
+PAYMENT_TYPE_COL = "payment_type"
+CREDIT_CARD_PAYMENT_TYPE = 1
+
+# Columns with heavy-tailed distributions; clipped then log1p-transformed during feature engineering.
+HEAVY_TAIL_COLS: list[str] = ["trip_distance", "fare_amount"]
+CLIP_QUANTILE = 0.99
 
 
 class DType(Enum):
