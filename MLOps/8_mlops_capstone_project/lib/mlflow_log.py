@@ -7,9 +7,15 @@ artifact, metric, and decision logging. No analysis logic lives here.
 from __future__ import annotations
 
 import mlflow
+import pandas as pd
+from mlflow.sklearn import log_model as log_sklearn_model
+from sklearn.pipeline import Pipeline
 
 from .integrity import CheckResult, hard_failure_reasons
 from .model_gate import ModelGateResult
+from .retrain import CandidateResult
+
+CANDIDATE_ARTIFACT_NAME = "candidate"
 
 
 _HARD_DASHBOARD_METRICS = [
@@ -60,6 +66,42 @@ def log_integrity_result(result: CheckResult, check: str) -> None:
 
     if check == "soft":
         mlflow.set_tag("integrity_warn", "true" if result.warnings else "false")
+
+
+def log_candidate_result(
+    result: CandidateResult,
+    model: Pipeline,
+    x_sample: pd.DataFrame,
+) -> None:
+    log_sklearn_model(
+        sk_model=model,
+        name=CANDIDATE_ARTIFACT_NAME,
+        input_example=x_sample.head(5),
+    )
+    mlflow.log_metrics({
+        "rmse_candidate": result.rmse_candidate,
+        "rmse_candidate_vs_champion_pct": result.rmse_delta_pct,
+        "candidate_train_rows": float(result.train_rows),
+        "candidate_window_months": float(result.window_months),
+    })
+    mlflow.log_params({
+        f"candidate_{k}": v for k, v in result.hyperparams.items()
+    })
+    mlflow.set_tag("candidate_logged", "true")
+    mlflow.log_dict(
+        {
+            "action": "train_candidate",
+            "rmse_candidate": result.rmse_candidate,
+            "rmse_champion_eval": result.rmse_champion_eval,
+            "rmse_delta_pct": result.rmse_delta_pct,
+            "train_window_months": result.window_months,
+            "train_window_start": result.train_window_start,
+            "train_window_end": result.train_window_end,
+            "train_rows": result.train_rows,
+            "train_files": result.train_files,
+        },
+        artifact_file="retrain/decision.json",
+    )
 
 
 def log_model_gate_result(result: ModelGateResult) -> None:

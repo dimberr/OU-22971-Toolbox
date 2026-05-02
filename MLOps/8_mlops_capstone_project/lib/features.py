@@ -31,6 +31,30 @@ from lib.green_taxi_schema import (
 )
 
 
+def time_split_batch(
+    df_raw: pd.DataFrame,
+    *,
+    eval_pct: float,
+    date_col: str = PICKUP_COL,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Time-order the batch by `date_col` and split off the most recent `eval_pct` as eval.
+
+    Used by Step E (champion evaluation) and Step F (candidate evaluation) so both
+    score on the same held-out tail and can be compared head-to-head fairly.
+    """
+    if not 0.0 < eval_pct < 1.0:
+        raise ValueError(f"eval_pct must be in (0, 1); got {eval_pct}")
+
+    sorted_df = cast(
+        pd.DataFrame,
+        df_raw.sort_values(date_col, kind="mergesort").reset_index(drop=True),
+    )
+    split_idx = int(len(sorted_df) * (1.0 - eval_pct))
+    train = cast(pd.DataFrame, sorted_df.iloc[:split_idx].copy())
+    eval_ = cast(pd.DataFrame, sorted_df.iloc[split_idx:].copy())
+    return train, eval_
+
+
 # Columns dropped from the feature matrix.
 # total_amount leaks the target (it includes tip_amount).
 # Dropoff datetime features are redundant once duration_min is present.

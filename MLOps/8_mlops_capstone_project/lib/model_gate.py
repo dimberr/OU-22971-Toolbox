@@ -45,21 +45,28 @@ def evaluate_champion(
     model: Pipeline,
     X_ref: pd.DataFrame,
     y_ref: np.ndarray,
-    X_batch: pd.DataFrame,
-    y_batch: np.ndarray,
+    X_batch_full: pd.DataFrame,
+    y_batch_full: np.ndarray,
+    X_batch_eval: pd.DataFrame,
+    y_batch_eval: np.ndarray,
     rmse_baseline: float,
 ) -> ModelGateResult:
-    y_pred_batch = model.predict(X_batch)
-    rmse_champion = float(np.sqrt(mean_squared_error(y_batch, y_pred_batch)))
+    # rmse_champion is computed on the held-out eval slice so the candidate
+    # in Step F can be compared head-to-head on the SAME rows.
+    rmse_champion = float(
+        np.sqrt(mean_squared_error(y_batch_eval, model.predict(X_batch_eval)))
+    )
     rmse_increase_pct = (rmse_champion - rmse_baseline) / rmse_baseline * 100
 
+    # NannyML still consumes the full batch so it has enough rows to chunk
+    # meaningfully (per-chunk drift signal drives the retrain decision).
     per_chunk, alert_chunks, total_chunks = _run_perf_calculator(
         model=model,
         X_ref=X_ref,
         y_ref=y_ref,
-        X_batch=X_batch,
-        y_batch=y_batch,
-        y_pred_batch=y_pred_batch,
+        X_batch=X_batch_full,
+        y_batch=y_batch_full,
+        y_pred_batch=model.predict(X_batch_full),
     )
 
     retrain_needed = alert_chunks > 0
