@@ -83,6 +83,7 @@ def bootstrap_champion(
             version_tags={
                 "role": "champion",
                 "promotion_reason": "bootstrap",
+                "decision_reason": "bootstrap",
                 "trained_on": reference_path,
             },
         )
@@ -190,6 +191,7 @@ def promote_to_champion(
         "role": "champion",
         "promoted_at": promoted_at,
         "promotion_reason": promotion_reason,
+        "decision_reason": promotion_reason,
         "validation_status": "approved",
     }
     for key, value in new_tags.items():

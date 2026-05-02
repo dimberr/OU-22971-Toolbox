@@ -208,6 +208,7 @@ class MLFlowCapstoneFlow(FlowSpec):
                 "validation_status": "pending",
                 "trained_on_batches": str(self.batch_path),
                 "eval_batch_id": str(self.batch_path),
+                "decision_reason": "pending",
             },
         )
 
