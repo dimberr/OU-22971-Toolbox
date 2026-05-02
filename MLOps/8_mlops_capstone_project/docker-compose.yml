@@ -27,6 +27,7 @@ services:
       DATA_DIR: /data
       UI_STATE_DIR: /app/ui_state
       USERNAME: capstone
+      PYTHONPATH: /app
     ports:
       - "8501:8501"
     volumes:

@@ -14,6 +14,7 @@ while a run is in progress; the lock lives on disk (ui/state.py).
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -58,6 +59,14 @@ def _last_status_for(file_name: str, history: list[state.RunRecord]) -> tuple[st
         if record.batch_file == file_name:
             return record.status, record.started_at
     return "—", ""
+
+
+def _run_button_help(*, is_running: bool, is_reference: bool) -> str:
+    if is_running:
+        return "A flow is already running"
+    if is_reference:
+        return "This file is the reference; pick a different batch"
+    return "Run the full pipeline on this batch"
 
 
 def _render_sidebar(data_dir: Path, parquet_files: list[Path]) -> dict:
@@ -142,7 +151,7 @@ def _render_batches_table(
     for path in parquet_files:
         is_reference = path.name == reference_file
         size_mb = path.stat().st_size / (1024 * 1024)
-        modified = pd.Timestamp(path.stat().st_mtime, unit="s").strftime("%Y-%m-%d %H:%M")
+        modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         last_status, last_at = _last_status_for(path.name, history)
         status_text = f"{STATUS_ICON.get(last_status, '—')} {last_status}"
         if last_at:
@@ -155,11 +164,7 @@ def _render_batches_table(
         cols[3].write(status_text)
 
         button_disabled = is_running or is_reference
-        button_help = (
-            "A flow is already running" if is_running
-            else "This file is the reference; pick a different batch" if is_reference
-            else "Run the full pipeline on this batch"
-        )
+        button_help = _run_button_help(is_running=is_running, is_reference=is_reference)
         if cols[4].button("Run flow", key=f"run-{path.name}", disabled=button_disabled, help=button_help):
             params = _build_run_params(data_dir=data_dir, settings=settings, batch_file=path.name)
             runner.start_run(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
@@ -188,7 +193,7 @@ def _render_live_log(state_dir: Path) -> None:
         st.warning("Sent SIGTERM to the running flow. It will be marked as failed.")
 
 
-def _render_history(history: list[state.RunRecord], state_dir: Path) -> None:
+def _render_history(history: list[state.RunRecord]) -> None:
     st.subheader("Recent runs")
     if not history:
         st.caption("No runs yet.")
@@ -256,7 +261,7 @@ def main() -> None:
         _render_live_log(state_dir)
 
     st.divider()
-    _render_history(history, state_dir)
+    _render_history(history)
 
 
 if __name__ == "__main__":
