@@ -124,7 +124,7 @@ def _render_sidebar(data_dir: Path, parquet_files: list[Path]) -> dict:
                 "min_improvement_pct", min_value=0.0, max_value=0.10, value=0.01, step=0.005,
             )
             max_ref_regression_pct = st.slider(
-                "max_ref_regression_pct", min_value=0.0, max_value=0.10, value=0.01, step=0.005,
+                "max_ref_regression_pct", min_value=0.0, max_value=0.50, value=0.01, step=0.01,
             )
 
         return {
