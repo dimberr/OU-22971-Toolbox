@@ -1,10 +1,10 @@
 """Subprocess flow runner.
 
-Spawns the flow as a detached `sh -c` subprocess so the parent shell can
-write the real exit code to a sidecar file once the flow finishes. We
-need this because Streamlit reruns the script on every interaction,
-which throws away any in-memory `Popen` handle, so we can't call
-`proc.wait()` to learn the exit code later.
+Spawns the flow (or bootstrap) as a detached `sh -c` subprocess so the
+parent shell can write the real exit code to a sidecar file once the
+process finishes. We need this because Streamlit reruns the script on
+every interaction, which throws away any in-memory `Popen` handle, so
+we can't call `proc.wait()` to learn the exit code later.
 
 Liveness check: probe the recorded PID with `os.kill(pid, 0)`.
 Exit code: read the sidecar file (only present after the process exits).
@@ -34,13 +34,53 @@ class RunParams:
     taxi_zone_lookup_path: str | None = None
 
 
+@dataclass
+class BootstrapParams:
+    reference_path: str
+    model_name: str
+
+
 def start_run(*, project_root: Path, state_dir: Path, params: RunParams) -> state.RunRecord:
+    return _start_subprocess(
+        project_root=project_root,
+        state_dir=state_dir,
+        flow_cmd=_build_flow_cmd(params),
+        batch_file=Path(params.batch_path).name,
+        reference_file=Path(params.reference_path).name,
+        params_summary=_params_summary(params),
+    )
+
+
+def start_bootstrap(
+    *,
+    project_root: Path,
+    state_dir: Path,
+    params: BootstrapParams,
+) -> state.RunRecord:
+    return _start_subprocess(
+        project_root=project_root,
+        state_dir=state_dir,
+        flow_cmd=_build_bootstrap_cmd(params),
+        batch_file="(bootstrap)",
+        reference_file=Path(params.reference_path).name,
+        params_summary={"action": "bootstrap", "model_name": params.model_name},
+    )
+
+
+def _start_subprocess(
+    *,
+    project_root: Path,
+    state_dir: Path,
+    flow_cmd: list[str],
+    batch_file: str,
+    reference_file: str,
+    params_summary: dict[str, str],
+) -> state.RunRecord:
     state.ensure_state_dir(state_dir)
 
     run_id = uuid.uuid4().hex[:8]
     log_path = state.log_path_for(state_dir, run_id)
     exit_code_path = _exit_code_path(state_dir, run_id)
-    flow_cmd = _build_flow_cmd(params)
 
     log_handle = log_path.open("w", buffering=1)
     log_handle.write(f"$ {' '.join(flow_cmd)}\n\n")
@@ -59,13 +99,13 @@ def start_run(*, project_root: Path, state_dir: Path, params: RunParams) -> stat
 
     record = state.RunRecord(
         id=run_id,
-        batch_file=Path(params.batch_path).name,
-        reference_file=Path(params.reference_path).name,
+        batch_file=batch_file,
+        reference_file=reference_file,
         started_at=state.utc_now_iso(),
         status="running",
         log_path=str(log_path),
         pid=proc.pid,
-        params=_params_summary(params),
+        params=params_summary,
     )
     state.save_current(state_dir, record)
     return record
@@ -133,6 +173,14 @@ def _build_flow_cmd(params: RunParams) -> list[str]:
     if params.taxi_zone_lookup_path:
         cmd += ["--taxi-zone-lookup-path", params.taxi_zone_lookup_path]
     return cmd
+
+
+def _build_bootstrap_cmd(params: BootstrapParams) -> list[str]:
+    return [
+        "python", "bootstrap.py",
+        "--reference-path", params.reference_path,
+        "--model-name", params.model_name,
+    ]
 
 
 def _params_summary(params: RunParams) -> dict[str, str]:

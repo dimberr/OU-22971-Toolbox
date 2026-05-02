@@ -3,12 +3,15 @@
 Layout:
 - Sidebar: data dir info, reference selector, model name, hyperparams, MLflow link.
 - Main:
-  * Available batches table with a "Run flow" button per row.
+  * Champion status: either a "Bootstrap champion" call-to-action (when no
+    champion exists) or the current champion version badge (when it does).
+  * Available batches table with a "Run flow" button per row (only enabled
+    once a champion exists).
   * Live log panel (visible while a flow is running, auto-refreshes).
   * Recent runs history.
 
-Concurrency: only one flow run at a time. The "Run" buttons are disabled
-while a run is in progress; the lock lives on disk (ui/state.py).
+Concurrency: only one flow run at a time. All Run/Bootstrap buttons are
+disabled while a run is in progress; the lock lives on disk (ui/state.py).
 """
 
 from __future__ import annotations
@@ -20,6 +23,8 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from lib.helper import init_mlflow
+from lib.model_registry import champion_version
 from ui import runner, state
 
 
@@ -61,12 +66,22 @@ def _last_status_for(file_name: str, history: list[state.RunRecord]) -> tuple[st
     return "—", ""
 
 
-def _run_button_help(*, is_running: bool, is_reference: bool) -> str:
+def _run_button_help(*, is_running: bool, is_reference: bool, has_champion: bool) -> str:
     if is_running:
         return "A flow is already running"
+    if not has_champion:
+        return "Bootstrap a champion first"
     if is_reference:
         return "This file is the reference; pick a different batch"
     return "Run the full pipeline on this batch"
+
+
+def _check_champion_status(model_name: str) -> str | None:
+    init_mlflow(model_name)
+    try:
+        return champion_version(model_name)
+    except Exception:  # pragma: no cover - tracking server may be transiently down
+        return None
 
 
 def _render_sidebar(data_dir: Path, parquet_files: list[Path]) -> dict:
@@ -128,12 +143,52 @@ def _build_run_params(
     )
 
 
+def _render_champion_section(
+    *,
+    champion_v: str | None,
+    settings: dict,
+    is_running: bool,
+    data_dir: Path,
+    state_dir: Path,
+) -> None:
+    st.subheader("Champion model")
+    model_name = settings["model_name"]
+    reference_file = settings["reference_file"]
+
+    if champion_v is not None:
+        st.success(f"Active champion: `{model_name}` v{champion_v} (alias `@champion`)")
+        return
+
+    st.warning(
+        f"No champion model exists yet for `{model_name}`. "
+        f"Bootstrap one from the reference file (`{reference_file}`) before running batches."
+    )
+    bootstrap_help = (
+        "A flow is already running" if is_running
+        else f"Train initial model on `{reference_file}` and register as @champion"
+    )
+    if st.button(
+        "Bootstrap champion from reference",
+        key="bootstrap-champion",
+        type="primary",
+        disabled=is_running,
+        help=bootstrap_help,
+    ):
+        params = runner.BootstrapParams(
+            reference_path=str(data_dir / reference_file),
+            model_name=model_name,
+        )
+        runner.start_bootstrap(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
+        st.rerun()
+
+
 def _render_batches_table(
     *,
     parquet_files: list[Path],
     settings: dict,
     history: list[state.RunRecord],
     is_running: bool,
+    has_champion: bool,
     data_dir: Path,
     state_dir: Path,
 ) -> None:
@@ -163,8 +218,12 @@ def _render_batches_table(
         cols[2].write(modified)
         cols[3].write(status_text)
 
-        button_disabled = is_running or is_reference
-        button_help = _run_button_help(is_running=is_running, is_reference=is_reference)
+        button_disabled = is_running or is_reference or not has_champion
+        button_help = _run_button_help(
+            is_running=is_running,
+            is_reference=is_reference,
+            has_champion=has_champion,
+        )
         if cols[4].button("Run flow", key=f"run-{path.name}", disabled=button_disabled, help=button_help):
             params = _build_run_params(data_dir=data_dir, settings=settings, batch_file=path.name)
             runner.start_run(project_root=PROJECT_ROOT, state_dir=state_dir, params=params)
@@ -246,12 +305,23 @@ def main() -> None:
     runner.finalize_if_done(state_dir)
     is_running = state.load_current(state_dir) is not None
     history = state.load_history(state_dir)
+    champion_v = _check_champion_status(settings["model_name"])
 
+    _render_champion_section(
+        champion_v=champion_v,
+        settings=settings,
+        is_running=is_running,
+        data_dir=data_dir,
+        state_dir=state_dir,
+    )
+
+    st.divider()
     _render_batches_table(
         parquet_files=parquet_files,
         settings=settings,
         history=history,
         is_running=is_running,
+        has_champion=champion_v is not None,
         data_dir=data_dir,
         state_dir=state_dir,
     )

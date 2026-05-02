@@ -122,13 +122,14 @@ class MLFlowCapstoneFlow(FlowSpec):
         model, version = load_champion_model(str(self.model_name))
 
         if model is None:
-            model, version = bootstrap_champion(
-                X_ref=self.X_ref,
-                y_ref=self.y_ref,
-                model_name=str(self.model_name),
-                run_id=self.run_id,
-                reference_path=str(self.reference_path),
-            )
+            with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+                model, version = bootstrap_champion(
+                    X_ref=self.X_ref,
+                    y_ref=self.y_ref,
+                    model_name=str(self.model_name),
+                    run_id=self.run_id,
+                    reference_path=str(self.reference_path),
+                )
             self.is_bootstrap = True
         else:
             with flow_run(model_name=str(self.model_name), run_id=self.run_id):

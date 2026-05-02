@@ -48,6 +48,19 @@ def load_champion_model(model_name: str) -> tuple[Pipeline, str] | tuple[None, N
         return None, None
 
 
+def champion_version(model_name: str) -> str | None:
+    """Return the @champion alias version, or None if no champion is set.
+
+    Lighter than `load_champion_model` because it skips loading the model
+    artifacts; intended for UI status checks.
+    """
+    client = mlflow.MlflowClient()
+    try:
+        return client.get_model_version_by_alias(model_name, CHAMPION_ALIAS).version
+    except MlflowException:
+        return None
+
+
 def bootstrap_champion(
     *,
     X_ref: pd.DataFrame,
@@ -56,48 +69,47 @@ def bootstrap_champion(
     run_id: str,
     reference_path: str,
 ) -> tuple[Pipeline, str]:
-    """Train on reference, log to the existing run, register, and set @champion.
+    """Train on reference, log to the active run, register, and set @champion.
 
-    Returns (fitted_model, version_number).
-    Called only when no @champion alias exists yet (first-ever run).
+    The caller is responsible for being inside an active mlflow run whose
+    id matches `run_id`. Returns (fitted_model, version_number).
     """
     model = build_model()
     model.fit(X_ref, y_ref)
 
     rmse_ref = float(np.sqrt(mean_squared_error(y_ref, model.predict(X_ref))))
 
-    with mlflow.start_run(run_id=run_id):
-        log_sklearn_model(sk_model=model, name=MODEL_ARTIFACT_NAME, input_example=X_ref.head(5))
-        mlflow.log_params({
-            "bootstrap_max_depth": _BOOTSTRAP_MAX_DEPTH,
-            "bootstrap_min_samples_leaf": _BOOTSTRAP_MIN_SAMPLES_LEAF,
-            "bootstrap_random_state": _BOOTSTRAP_RANDOM_STATE,
-            "bootstrap_ccp_alpha": _BOOTSTRAP_CCP_ALPHA,
-        })
-        mlflow.log_metric("rmse_ref", rmse_ref)
-        mlflow.set_tag("bootstrap", "true")
+    log_sklearn_model(sk_model=model, name=MODEL_ARTIFACT_NAME, input_example=X_ref.head(5))
+    mlflow.log_params({
+        "bootstrap_max_depth": _BOOTSTRAP_MAX_DEPTH,
+        "bootstrap_min_samples_leaf": _BOOTSTRAP_MIN_SAMPLES_LEAF,
+        "bootstrap_random_state": _BOOTSTRAP_RANDOM_STATE,
+        "bootstrap_ccp_alpha": _BOOTSTRAP_CCP_ALPHA,
+    })
+    mlflow.log_metric("rmse_ref", rmse_ref)
+    mlflow.set_tag("bootstrap", "true")
 
-        version = register_as_champion(
-            model_name=model_name,
-            run_id=run_id,
-            version_tags={
-                "role": "champion",
-                "promotion_reason": "bootstrap",
-                "decision_reason": "bootstrap",
-                "trained_on": reference_path,
-            },
-        )
+    version = register_as_champion(
+        model_name=model_name,
+        run_id=run_id,
+        version_tags={
+            "role": "champion",
+            "promotion_reason": "bootstrap",
+            "decision_reason": "bootstrap",
+            "trained_on": reference_path,
+        },
+    )
 
-        mlflow.log_dict(
-            {
-                "action": "bootstrap",
-                "reason": "No champion found in registry",
-                "model_name": model_name,
-                "version": version,
-                "promotion_reason": "bootstrap",
-            },
-            artifact_file="load_champion/decision.json",
-        )
+    mlflow.log_dict(
+        {
+            "action": "bootstrap",
+            "reason": "No champion found in registry",
+            "model_name": model_name,
+            "version": version,
+            "promotion_reason": "bootstrap",
+        },
+        artifact_file="load_champion/decision.json",
+    )
 
     return model, version
 
