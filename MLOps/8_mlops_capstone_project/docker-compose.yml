@@ -10,6 +10,8 @@ services:
       --backend-store-uri sqlite:////mlflow/mlflow.db
       --default-artifact-root /mlflow/artifacts
       --allowed-hosts mlflow,mlflow:5000,localhost,localhost:5000,127.0.0.1,127.0.0.1:5000
+    environment:
+      GIT_PYTHON_REFRESH: quiet
     ports:
       - "5000:5000"
     volumes:
@@ -28,6 +30,7 @@ services:
       UI_STATE_DIR: /app/ui_state
       USERNAME: capstone
       PYTHONPATH: /app
+      GIT_PYTHON_REFRESH: quiet
     ports:
       - "8501:8501"
     volumes:
