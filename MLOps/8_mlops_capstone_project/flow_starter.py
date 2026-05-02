@@ -8,6 +8,10 @@ from lib.mlflow_log import log_integrity_result
 from lib.green_taxi_schema import GREEN_TAXI_SCHEMA
 from lib.helper import flow_run, init_mlflow, load_batch, load_reference
 from lib.features import FeatureSpec, engineer_features, fit_feature_spec
+from lib.model_registry import (
+    bootstrap_champion,
+    load_champion_model,
+)
 
 
 class MLFlowCapstoneFlow(FlowSpec):
@@ -77,9 +81,35 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def load_champion(self):
-        # TODO: Add relevant steps and flow logic.
+        model, version = load_champion_model(str(self.model_name))
+
+        if model is None:
+            model, version = bootstrap_champion(
+                X_ref=self.X_ref,
+                y_ref=self.y_ref,
+                model_name=str(self.model_name),
+                run_id=self.run_id,
+                reference_path=str(self.reference_path),
+            )
+            self.is_bootstrap = True
+        else:
+            with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+                mlflow.set_tag("champion_version", version)
+                mlflow.log_dict(
+                    {"action": "load_champion", "model_name": str(self.model_name), "version": version},
+                    artifact_file="load_champion/decision.json",
+                )
+            self.is_bootstrap = False
+
+        self.champion_model = model
+        self.champion_version = version
+        self.next(self.model_gate)
+
+    @step
+    def model_gate(self):
+        # TODO: Step E - evaluate champion on batch, decide whether to retrain.
         self.next(self.end)
-    
+
     @step
     def end(self):
         if self.batch_rejected:
