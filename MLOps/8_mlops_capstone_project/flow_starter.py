@@ -208,6 +208,8 @@ class MLFlowCapstoneFlow(FlowSpec):
     @step
     def retrain(self):
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            # Uncomment to trigger a failure and resume the flow
+            # raise RuntimeError("demo")
             window_months = cast(int, self.rolling_window_months)
             training_raw, train_files = build_rolling_training_set(
                 historical_dir=Path(str(self.historical_dir)),
