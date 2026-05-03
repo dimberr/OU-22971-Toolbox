@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import cast
 
 import mlflow
+import mlflow.data
+from mlflow.data.pandas_dataset import from_pandas
 import numpy as np
 import pandas as pd
 from metaflow.flowspec import FlowSpec
@@ -52,33 +54,55 @@ class MLFlowCapstoneFlow(FlowSpec):
             self.run_id = run.info.run_id
             mlflow.set_tags({
                 "pipeline": "capstone_monitoring",
-                "reference_path": str(self.reference_path),
-                "batch_path": str(self.batch_path),
                 "model_name": str(self.model_name),
+                "flow_status": "running",
             })
         self.next(self.load_data)
 
     @step
     def load_data(self):
-        self.ref, self.batch = load_reference(self.reference_path), load_batch(self.batch_path)
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            self.ref = load_reference(self.reference_path)
+            self.batch = load_batch(self.batch_path)
+            # Log raw inputs as MLflow datasets so the Datasets panel shows
+            # source URI + schema + row count + a content hash. The hash makes
+            # runs that consumed the same parquet file deduplicate and link
+            # together in the UI.
+            mlflow.log_input(
+                from_pandas(
+                    self.ref,
+                    source=str(self.reference_path),
+                    name=Path(str(self.reference_path)).name,
+                ),
+                context="reference",
+            )
+            mlflow.log_input(
+                from_pandas(
+                    self.batch,
+                    source=str(self.batch_path),
+                    name=Path(str(self.batch_path)).name,
+                ),
+                context="batch",
+            )
         self.next(self.hard_integrity_gate)
 
     @step
     def hard_integrity_gate(self):
-        zone_lookup_path = str(self.taxi_zone_lookup_path) if self.taxi_zone_lookup_path else None
-
-        hard_check_result = run_hard_integrity_checks(
-            df_raw=self.batch,
-            schema=GREEN_TAXI_SCHEMA,
-            zone_lookup_path=zone_lookup_path,
-        )
-
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            zone_lookup_path = str(self.taxi_zone_lookup_path) if self.taxi_zone_lookup_path else None
+
+            hard_check_result = run_hard_integrity_checks(
+                df_raw=self.batch,
+                schema=GREEN_TAXI_SCHEMA,
+                zone_lookup_path=zone_lookup_path,
+            )
+
             log_integrity_result(hard_check_result, check="hard")
 
-        ok = hard_is_ok(hard_check_result)
-        self.batch_rejected = not ok
-        self.integrity_decision = "pass" if ok else "fail"
+            ok = hard_is_ok(hard_check_result)
+            self.batch_rejected = not ok
+            self.integrity_decision = "pass" if ok else "fail"
+
         self.next(
             {"pass": self.soft_integrity_gate, "fail": self.end},  # pyright: ignore[reportArgumentType]
             condition="integrity_decision",
@@ -86,47 +110,45 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def soft_integrity_gate(self):
-        soft_check_result = run_soft_integrity_checks(
-            reference=self.ref,
-            batch=self.batch,
-        )
-
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            soft_check_result = run_soft_integrity_checks(
+                reference=self.ref,
+                batch=self.batch,
+            )
             log_integrity_result(soft_check_result, check="soft")
-
-        self.integrity_warn = bool(soft_check_result.warnings)
+            self.integrity_warn = bool(soft_check_result.warnings)
         self.next(self.feature_engineering)
 
     @step
     def feature_engineering(self):
-        self.feature_spec: FeatureSpec = fit_feature_spec(self.ref)
-
-        # Time-split the raw batch: last `batch_eval_pct` becomes the eval slice
-        # used by both Step E (champion) and Step F (candidate). The train slice
-        # is reused as the freshest contribution to the candidate's training set.
-        self.batch_train_raw, batch_eval_raw = time_split_batch(
-            self.batch, eval_pct=cast(float, self.batch_eval_pct),
-        )
-
-        self.X_ref, self.y_ref = engineer_features(self.ref, self.feature_spec)
-        self.X_batch_train, self.y_batch_train = engineer_features(
-            self.batch_train_raw, self.feature_spec,
-        )
-        self.X_batch_eval, self.y_batch_eval = engineer_features(
-            batch_eval_raw, self.feature_spec,
-        )
-
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            self.feature_spec: FeatureSpec = fit_feature_spec(self.ref)
+
+            # Time-split the raw batch: last `batch_eval_pct` becomes the eval slice
+            # used by both Step E (champion) and Step F (candidate). The train slice
+            # is reused as the freshest contribution to the candidate's training set.
+            self.batch_train_raw, batch_eval_raw = time_split_batch(
+                self.batch, eval_pct=cast(float, self.batch_eval_pct),
+            )
+
+            self.X_ref, self.y_ref = engineer_features(self.ref, self.feature_spec)
+            self.X_batch_train, self.y_batch_train = engineer_features(
+                self.batch_train_raw, self.feature_spec,
+            )
+            self.X_batch_eval, self.y_batch_eval = engineer_features(
+                batch_eval_raw, self.feature_spec,
+            )
+
             mlflow.log_dict(self.feature_spec.to_dict(), "feature_spec.json")
 
         self.next(self.load_champion)
 
     @step
     def load_champion(self):
-        model, version = load_champion_model(str(self.model_name))
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            model, version = load_champion_model(str(self.model_name))
 
-        if model is None:
-            with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            if model is None:
                 model, version = bootstrap_champion(
                     X_ref=self.X_ref,
                     y_ref=self.y_ref,
@@ -134,50 +156,50 @@ class MLFlowCapstoneFlow(FlowSpec):
                     run_id=self.run_id,
                     reference_path=str(self.reference_path),
                 )
-            self.is_bootstrap = True
-        else:
-            with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+                self.is_bootstrap = True
+            else:
                 mlflow.set_tag("champion_version", version)
                 mlflow.log_dict(
                     {"action": "load_champion", "model_name": str(self.model_name), "version": version},
                     artifact_file="load_champion/decision.json",
                 )
-            self.is_bootstrap = False
+                self.is_bootstrap = False
 
-        self.champion_model = model
-        self.champion_version = version
+            self.champion_model = model
+            self.champion_version = version
         self.next(self.model_gate)
 
     @step
     def model_gate(self):
-        rmse_baseline = get_champion_baseline_rmse(str(self.model_name), str(self.champion_version))
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            rmse_baseline = get_champion_baseline_rmse(str(self.model_name), str(self.champion_version))
 
-        if rmse_baseline is None:
-            raise RuntimeError(
-                f"Champion version {self.champion_version} has no '{RMSE_REF_METRIC}' "
-                "metric in MLflow. Re-bootstrap or manually log it."
+            if rmse_baseline is None:
+                raise RuntimeError(
+                    f"Champion version {self.champion_version} has no '{RMSE_REF_METRIC}' "
+                    "metric in MLflow. Re-bootstrap or manually log it."
+                )
+
+            X_batch_full = pd.concat([self.X_batch_train, self.X_batch_eval], ignore_index=True)
+            y_batch_full = np.concatenate([self.y_batch_train, self.y_batch_eval])
+
+            result = evaluate_champion(
+                model=self.champion_model,
+                X_ref=self.X_ref,
+                y_ref=self.y_ref,
+                X_batch_full=X_batch_full,
+                y_batch_full=y_batch_full,
+                X_batch_eval=self.X_batch_eval,
+                y_batch_eval=self.y_batch_eval,
+                rmse_baseline=rmse_baseline,
             )
 
-        X_batch_full = pd.concat([self.X_batch_train, self.X_batch_eval], ignore_index=True)
-        y_batch_full = np.concatenate([self.y_batch_train, self.y_batch_eval])
-
-        result = evaluate_champion(
-            model=self.champion_model,
-            X_ref=self.X_ref,
-            y_ref=self.y_ref,
-            X_batch_full=X_batch_full,
-            y_batch_full=y_batch_full,
-            X_batch_eval=self.X_batch_eval,
-            y_batch_eval=self.y_batch_eval,
-            rmse_baseline=rmse_baseline,
-        )
-
-        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
             log_model_gate_result(result)
 
-        self.retrain_needed = result.retrain_needed
-        self.rmse_champion_eval = result.rmse_champion
-        self.retrain_decision = "retrain" if result.retrain_needed else "skip"
+            self.retrain_needed = result.retrain_needed
+            self.rmse_champion_eval = result.rmse_champion
+            self.retrain_decision = "retrain" if result.retrain_needed else "skip"
+
         self.next(
             {"retrain": self.retrain, "skip": self.end},  # pyright: ignore[reportArgumentType]
             condition="retrain_decision",
@@ -185,97 +207,102 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def retrain(self):
-        window_months = cast(int, self.rolling_window_months)
-        training_raw, train_files = build_rolling_training_set(
-            historical_dir=Path(str(self.historical_dir)),
-            batch_path=Path(str(self.batch_path)),
-            batch_train_raw=self.batch_train_raw,
-            window_months=window_months,
-        )
-
-        candidate_model, candidate_result = train_and_evaluate_candidate(
-            training_raw=training_raw,
-            feature_spec=self.feature_spec,
-            X_batch_eval=self.X_batch_eval,
-            y_batch_eval=self.y_batch_eval,
-            rmse_champion_eval=self.rmse_champion_eval,
-            train_files=train_files,
-            window_months=window_months,
-        )
-
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            window_months = cast(int, self.rolling_window_months)
+            training_raw, train_files = build_rolling_training_set(
+                historical_dir=Path(str(self.historical_dir)),
+                batch_path=Path(str(self.batch_path)),
+                batch_train_raw=self.batch_train_raw,
+                window_months=window_months,
+            )
+
+            candidate_model, candidate_result = train_and_evaluate_candidate(
+                training_raw=training_raw,
+                feature_spec=self.feature_spec,
+                X_batch_eval=self.X_batch_eval,
+                y_batch_eval=self.y_batch_eval,
+                rmse_champion_eval=self.rmse_champion_eval,
+                train_files=train_files,
+                window_months=window_months,
+            )
+
             log_candidate_result(candidate_result, candidate_model, self.X_batch_eval)
 
-        self.candidate_model = candidate_model
-        self.candidate_rmse = candidate_result.rmse_candidate
-        self.candidate_rmse_delta_pct = candidate_result.rmse_delta_pct
+            self.candidate_model = candidate_model
+            self.candidate_rmse = candidate_result.rmse_candidate
+            self.candidate_rmse_delta_pct = candidate_result.rmse_delta_pct
         self.next(self.promote)
 
     @step
     def promote(self):
-        candidate_version = register_candidate(
-            model_name=str(self.model_name),
-            run_id=self.run_id,
-            version_tags={
-                "role": "candidate",
-                "validation_status": "pending",
-                "trained_on_batches": str(self.batch_path),
-                "eval_batch_id": str(self.batch_path),
-                "decision_reason": "pending",
-            },
-        )
-
-        promotion = evaluate_promotion(
-            champion_model=self.champion_model,
-            candidate_model=self.candidate_model,
-            X_ref=self.X_ref,
-            y_ref=self.y_ref,
-            rmse_champion_eval=self.rmse_champion_eval,
-            rmse_candidate_eval=self.candidate_rmse,
-            integrity_warn=bool(self.integrity_warn),
-            min_improvement_pct=cast(float, self.min_improvement_pct),
-            max_ref_regression_pct=cast(float, self.max_ref_regression_pct),
-        )
-
-        demoted_version: str | None = None
-        if promotion.promoted:
-            demoted_version = promote_to_champion(
-                model_name=str(self.model_name),
-                candidate_version=candidate_version,
-                promotion_reason=promotion.decision_reason,
-            )
-        else:
-            mark_candidate_rejected(
-                model_name=str(self.model_name),
-                candidate_version=candidate_version,
-                decision_reason=promotion.decision_reason,
-            )
-
         with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            candidate_version = register_candidate(
+                model_name=str(self.model_name),
+                run_id=self.run_id,
+                version_tags={
+                    "role": "candidate",
+                    "validation_status": "pending",
+                    "trained_on_batches": str(self.batch_path),
+                    "eval_batch_id": str(self.batch_path),
+                    "decision_reason": "pending",
+                },
+            )
+
+            promotion = evaluate_promotion(
+                champion_model=self.champion_model,
+                candidate_model=self.candidate_model,
+                X_ref=self.X_ref,
+                y_ref=self.y_ref,
+                rmse_champion_eval=self.rmse_champion_eval,
+                rmse_candidate_eval=self.candidate_rmse,
+                integrity_warn=bool(self.integrity_warn),
+                min_improvement_pct=cast(float, self.min_improvement_pct),
+                max_ref_regression_pct=cast(float, self.max_ref_regression_pct),
+            )
+
+            demoted_version: str | None = None
+            if promotion.promoted:
+                demoted_version = promote_to_champion(
+                    model_name=str(self.model_name),
+                    candidate_version=candidate_version,
+                    promotion_reason=promotion.decision_reason,
+                )
+            else:
+                mark_candidate_rejected(
+                    model_name=str(self.model_name),
+                    candidate_version=candidate_version,
+                    decision_reason=promotion.decision_reason,
+                )
+
             log_promotion_result(
                 promotion,
                 candidate_version=candidate_version,
                 demoted_version=demoted_version,
             )
 
-        self.candidate_version = candidate_version
-        self.promoted = promotion.promoted
+            self.candidate_version = candidate_version
+            self.promoted = promotion.promoted
         self.next(self.end)
 
     @step
     def end(self):
-        result = build_flow_result(
-            batch_rejected=self.batch_rejected,
-            retrain_needed=getattr(self, "retrain_needed", None),
-            rmse_champion=getattr(self, "rmse_champion_eval", None),
-            integrity_warn=bool(getattr(self, "integrity_warn", False)),
-            promoted=getattr(self, "promoted", None),
-            candidate_version=getattr(self, "candidate_version", None),
-            candidate_rmse=getattr(self, "candidate_rmse", None),
-            candidate_rmse_delta_pct=getattr(self, "candidate_rmse_delta_pct", None),
-        )
-        print(result["summary"])
-        write_flow_result(str(self.ui_result_path) if self.ui_result_path else None, result)
+        with flow_run(model_name=str(self.model_name), run_id=self.run_id):
+            result = build_flow_result(
+                batch_rejected=self.batch_rejected,
+                retrain_needed=getattr(self, "retrain_needed", None),
+                rmse_champion=getattr(self, "rmse_champion_eval", None),
+                integrity_warn=bool(getattr(self, "integrity_warn", False)),
+                promoted=getattr(self, "promoted", None),
+                candidate_version=getattr(self, "candidate_version", None),
+                candidate_rmse=getattr(self, "candidate_rmse", None),
+                candidate_rmse_delta_pct=getattr(self, "candidate_rmse_delta_pct", None),
+            )
+            mlflow.set_tag(
+                "flow_status",
+                "batch_rejected" if self.batch_rejected else "succeeded",
+            )
+            print(result["summary"])
+            write_flow_result(str(self.ui_result_path) if self.ui_result_path else None, result)
 
 
 if __name__ == "__main__":

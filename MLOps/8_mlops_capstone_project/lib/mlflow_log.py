@@ -13,7 +13,7 @@ from sklearn.pipeline import Pipeline
 
 from .integrity import CheckResult, hard_failure_reasons
 from .model_gate import ModelGateResult
-from .model_registry import CANDIDATE_ARTIFACT_NAME
+from .model_registry import MODEL_ARTIFACT_NAME
 from .promotion import PromotionResult
 from .retrain import CandidateResult
 
@@ -75,7 +75,7 @@ def log_candidate_result(
 ) -> None:
     log_sklearn_model(
         sk_model=model,
-        name=CANDIDATE_ARTIFACT_NAME,
+        name=MODEL_ARTIFACT_NAME,
         input_example=x_sample.head(5),
     )
     mlflow.log_metrics({
@@ -136,6 +136,12 @@ def log_promotion_result(
     demoted_version: str | None,
 ) -> None:
     mlflow.log_metrics({
+        # `rmse_ref` mirrors `rmse_candidate_ref` on purpose: if this candidate
+        # is promoted, its source MLflow run becomes the new champion's source
+        # run, and the next flow's `get_champion_baseline_rmse` reads `rmse_ref`
+        # from it (same name `bootstrap_champion` uses). Logging unconditionally
+        # keeps every model version's source run uniform.
+        "rmse_ref": result.rmse_candidate_ref,
         "rmse_candidate_ref": result.rmse_candidate_ref,
         "rmse_champion_ref": result.rmse_champion_ref,
         "rmse_ref_delta_pct": result.rmse_ref_delta_pct,

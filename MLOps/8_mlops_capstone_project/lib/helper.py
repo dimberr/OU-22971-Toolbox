@@ -22,10 +22,23 @@ def flow_run(model_name: str, run_id: str) -> Iterator[None]:
     Each Metaflow step may execute in a fresh subprocess, so the tracking URI
     and experiment have to be re-set, and the parent run has to be reattached
     by id. All step-level logging then lands on the single flow-scoped run.
+
+    On any exception inside the wrapped block, the run is tagged
+    ``flow_status=interrupted`` before the exception propagates. The outer
+    ``mlflow.start_run`` context will then mark the run lifecycle as FAILED.
+    Together they give the UI an accurate "this run did not complete" signal
+    even when a later step (e.g. ``end``) never gets a chance to run.
     """
     init_mlflow(model_name)
     with mlflow.start_run(run_id=run_id):
-        yield
+        try:
+            yield
+        except BaseException:
+            try:
+                mlflow.set_tag("flow_status", "interrupted")
+            except Exception:
+                pass
+            raise
 
 
 # Reasons to split this into a separate function:

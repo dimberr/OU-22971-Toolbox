@@ -31,7 +31,6 @@ FEATURE_SPEC_ARTIFACT = "feature_spec.json"
 
 
 MODEL_ARTIFACT_NAME = "model"
-CANDIDATE_ARTIFACT_NAME = "candidate"
 CHAMPION_ALIAS = "champion"
 
 _BOOTSTRAP_MAX_DEPTH = 8
@@ -203,7 +202,7 @@ def register_candidate(
     model_name: str,
     run_id: str,
     version_tags: dict[str, str],
-    artifact_name: str = CANDIDATE_ARTIFACT_NAME,
+    artifact_name: str = MODEL_ARTIFACT_NAME,
 ) -> str:
     """Register the candidate logged in run_id as a new model version.
 
