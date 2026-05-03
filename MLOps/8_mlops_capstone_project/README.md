@@ -57,7 +57,7 @@ cd TLC_Data
 # A reference month (used to fit the FeatureSpec) — required.
 curl -O https://d37ci6vzurychx.cloudfront.net/trip-data/green_tripdata_2020-01.parquet
 
-# A few extra months to play with (pick any).
+# A few extra months to play with.
 curl -O https://d37ci6vzurychx.cloudfront.net/trip-data/green_tripdata_2020-04.parquet
 curl -O https://d37ci6vzurychx.cloudfront.net/trip-data/green_tripdata_2020-08.parquet
 curl -O https://d37ci6vzurychx.cloudfront.net/trip-data/green_tripdata_2021-01.parquet
@@ -66,7 +66,8 @@ curl -O https://d37ci6vzurychx.cloudfront.net/trip-data/green_tripdata_2025-08.p
 
 # Optional: NYC taxi zone lookup (used by the hard integrity gate to validate
 # PULocationID / DOLocationID values). Without it that check is skipped.
-curl -L -o NYC_Taxi_Zones.geojson "https://data.cityofnewyork.us/api/geospatial/d3c5-ddgc?method=export&format=GeoJSON"
+https://www.kaggle.com/datasets/mxruedag/tlc-nyc-taxi-zones
+Save it as NYC_Taxi_Zones.geojson
 
 cd ..
 ```
@@ -79,36 +80,40 @@ Source pages:
 ### 3. Start the stack
 
 ```bash
-docker compose up -d --build
+docker compose up --build
 ```
 
 This brings up two containers, both bound to `127.0.0.1` only (no LAN exposure):
 
-| Service | URL | Purpose |
-|---|---|---|
-| `mlflow` | http://localhost:5000 | MLflow tracking + model registry UI |
-| `ui` | http://localhost:8501 | Streamlit control panel for the flow |
+
+| Service  | URL                                            | Purpose                              |
+| -------- | ---------------------------------------------- | ------------------------------------ |
+| `mlflow` | [http://localhost:5000](http://localhost:5000) | MLflow tracking + model registry UI  |
+| `ui`     | [http://localhost:8501](http://localhost:8501) | Streamlit control panel for the flow |
+
 
 State that survives container restarts is mounted from the host:
 
-| Host path | Container path | Contents |
-|---|---|---|
-| `./TLC_Data` | `/data` | Input parquet files + zone lookup (read-only in practice) |
-| `./mlflow_tracking` | `/mlflow` | SQLite backing DB + artifact store |
-| `./ui_state` | `/app/ui_state` | Run history, logs, predictions, result sidecars for the UI |
-| `./metaflow_state` | `/app/.metaflow` | Metaflow's per-run checkpoint store |
+
+| Host path           | Container path   | Contents                                                   |
+| ------------------- | ---------------- | ---------------------------------------------------------- |
+| `./TLC_Data`        | `/data`          | Input parquet files + zone lookup (read-only in practice)  |
+| `./mlflow_tracking` | `/mlflow`        | SQLite backing DB + artifact store                         |
+| `./ui_state`        | `/app/ui_state`  | Run history, logs, predictions, result sidecars for the UI |
+| `./metaflow_state`  | `/app/.metaflow` | Metaflow's per-run checkpoint store                        |
+
 
 ### 4. First-time use
 
-1. Open the Streamlit UI at http://localhost:8501.
+1. Open the Streamlit UI at [http://localhost:8501](http://localhost:8501).
 2. The "Champion model" section will show **No champion model exists yet**. Click
-   **Bootstrap champion from reference**.
+  **Bootstrap champion from reference**.
 3. After ~10 s the UI flips to **Active champion: green_taxi_tip_model v1**.
 4. Pick any non-reference parquet in the **Available batches** table and click
-   **Run flow**. The live log streams in below; on completion the row's "retrain?"
+  **Run flow**. The live log streams in below; on completion the row's "retrain?"
    and "outcome" columns reflect the gate decision.
-5. Open the MLflow UI at http://localhost:5000 to see the run, its metrics, tags,
-   and `decision.json` artifacts. Experiment name: `green_taxi_tip_model`.
+5. Open the MLflow UI at [http://localhost:5000](http://localhost:5000) to see the run, its metrics, tags,
+  and `decision.json` artifacts. Experiment name: `green_taxi_tip_model`.
 
 ---
 
@@ -142,15 +147,15 @@ and the alias flips.
 ```text
 (start from the baseline state above, with v1 champion bootstrapped)
 In the UI sidebar, expand "Advanced parameters" and set:
-    max_ref_regression_pct = 0.30
+    max_ref_regression_pct = 0.35
 Then Run flow on /data/green_tripdata_2025-08.parquet
 ```
 
-Why the slider matters: with the strict default `max_ref_regression_pct = 0.01`,
-the candidate trained on the rolling 12 months ending in 2025-08 would be
-correctly rejected because it regresses on the 2020-01 reference by ~21%
-(catastrophic forgetting). This is honest behaviour but doesn't show a
-promotion. Setting the budget to 0.30 expresses the policy "we accept the
+Why the slider matters: with the strict default `max_ref_regression_pct = 0.01`,  
+the candidate trained on the rolling 12 months ending in 2025-08 would be  
+correctly rejected because it regresses on the 2020-01 reference by ~21%  
+(catastrophic forgetting). This is honest behaviour but doesn't show a  
+promotion. Setting the budget to 0.35 expresses the policy "we accept the  
 2020 reference is stale" and lets the candidate through.
 
 Expected outcome in MLflow + UI:
@@ -190,20 +195,22 @@ directly on the host, `pip install -r requirements.txt` into a venv and point
 
 ## Where to look in MLflow for grading evidence
 
-Open http://localhost:5000.
+Open [http://localhost:5000](http://localhost:5000).
 
-| Rubric item | Where it lives |
-|---|---|
-| Champion eval metrics (`rmse_champion`, `rmse_increase_pct`) | Run → "Metrics" tab |
-| `decision.json` for each gate | Run → "Artifacts" tab → `hard_integrity/`, `soft_integrity/`, `model_gate/`, `promote/` |
-| NannyML soft-gate report (HTML) | Run → "Artifacts" → `soft_integrity/` |
-| Tags reflecting decisions (`retrain_recommended`, `promoted`, etc.) | Run → "Tags" panel |
-| New model version (Scenario 2) | "Models" → `green_taxi_tip_model` → Versions list |
-| `@champion` alias movement | "Models" → `green_taxi_tip_model` → "Aliases" column |
-| `previous_champion` tag on demoted v1 | "Models" → `green_taxi_tip_model` → click v1 → Tags |
-| Inference predictions artifact | Run with `pipeline=capstone_inference` tag → Artifacts → `predictions.parquet` |
 
-All flow runs use experiment name **`green_taxi_tip_model`**.
+| Rubric item                                                         | Where it lives                                                                          |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Champion eval metrics (`rmse_champion`, `rmse_increase_pct`)        | Run → "Metrics" tab                                                                     |
+| `decision.json` for each gate                                       | Run → "Artifacts" tab → `hard_integrity/`, `soft_integrity/`, `model_gate/`, `promote/` |
+| NannyML soft-gate report (HTML)                                     | Run → "Artifacts" → `soft_integrity/`                                                   |
+| Tags reflecting decisions (`retrain_recommended`, `promoted`, etc.) | Run → "Tags" panel                                                                      |
+| New model version (Scenario 2)                                      | "Models" → `green_taxi_tip_model` → Versions list                                       |
+| `@champion` alias movement                                          | "Models" → `green_taxi_tip_model` → "Aliases" column                                    |
+| `previous_champion` tag on demoted v1                               | "Models" → `green_taxi_tip_model` → click v1 → Tags                                     |
+| Inference predictions artifact                                      | Run with `pipeline=capstone_inference` tag → Artifacts → `predictions.parquet`          |
+
+
+All flow runs use experiment name `**green_taxi_tip_model**`.
 
 ---
 
@@ -228,7 +235,7 @@ python flow_starter.py run \
     --rolling-window-months 12 \
     --batch-eval-pct        0.2 \
     --min-improvement-pct   0.01 \
-    --max-ref-regression-pct 0.30 \
+    --max-ref-regression-pct 0.35 \
     --taxi-zone-lookup-path /data/NYC_Taxi_Zones.geojson
 
 # 3. Score a batch with @champion and log predictions.parquet.
@@ -291,20 +298,20 @@ export MLFLOW_TRACKING_URI=http://localhost:5000
 production endpoint. It is a *deployment* status, not a *quality* grade.
 
 - The very first model becomes champion automatically via `bootstrap.py` (no
-  competition; it's the only model in the registry).
+competition; it's the only model in the registry).
 - Every subsequent training run produces a **candidate** that must pass all four
-  P-criteria in `lib/promotion.py` before the alias moves.
+P-criteria in `lib/promotion.py` before the alias moves.
 - A demoted version is tagged `role=previous_champion` for auditability.
 
 ### `rmse_baseline` vs `rmse_champion`
 
 Both are RMSEs of the *same model*, on *different datasets*:
 
-- **`rmse_baseline`** — RMSE the champion got on the reference data at
-  *training time*, stamped on the model version.
-- **`rmse_champion`** — RMSE the champion gets on *this* run's eval slice,
-  recomputed every flow run. Read together with `rmse_increase_pct`, it tells
-  you how much performance has drifted since training.
+- `**rmse_baseline`** — RMSE the champion got on the reference data at
+*training time*, stamped on the model version.
+- `**rmse_champion`** — RMSE the champion gets on *this* run's eval slice,
+recomputed every flow run. Read together with `rmse_increase_pct`, it tells
+you how much performance has drifted since training.
 
 ### Why retrain is decided per-chunk, not per-average
 
@@ -335,8 +342,9 @@ doesn't reap zombies).
 ### Stretch goals from the design doc
 
 - Stretch A (automation / event triggering) — partially done: the UI watches
-  `TLC_Data/` and exposes new files as a one-click "Run flow" trigger
-  (manual button rather than `cron`-based polling, by request).
+`TLC_Data/` and exposes new files as a one-click "Run flow" trigger
+(manual button rather than `cron`-based polling, by request).
 - Stretch B (Giskard) — not implemented.
 - Stretch C (web deployment) — not implemented (the project ships with a
-  containerised local stack instead).
+containerised local stack instead).
+

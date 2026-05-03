@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 from typing import cast
 
@@ -9,6 +8,7 @@ from metaflow.flowspec import FlowSpec
 from metaflow.parameters import Parameter
 from metaflow.decorators import step
 
+from lib.flow_result import build_flow_result, write_flow_result
 from lib.integrity import hard_is_ok, run_hard_integrity_checks, run_soft_integrity_checks
 from lib.mlflow_log import (
     log_candidate_result,
@@ -264,76 +264,18 @@ class MLFlowCapstoneFlow(FlowSpec):
 
     @step
     def end(self):
-        result = self._build_ui_result()
+        result = build_flow_result(
+            batch_rejected=self.batch_rejected,
+            retrain_needed=getattr(self, "retrain_needed", None),
+            rmse_champion=getattr(self, "rmse_champion_eval", None),
+            integrity_warn=bool(getattr(self, "integrity_warn", False)),
+            promoted=getattr(self, "promoted", None),
+            candidate_version=getattr(self, "candidate_version", None),
+            candidate_rmse=getattr(self, "candidate_rmse", None),
+            candidate_rmse_delta_pct=getattr(self, "candidate_rmse_delta_pct", None),
+        )
         print(result["summary"])
-        self._maybe_write_ui_result(result)
-
-    def _build_ui_result(self) -> dict:
-        if self.batch_rejected:
-            return {
-                "outcome": "batch_rejected",
-                "retrain_needed": None,
-                "promoted": None,
-                "summary": (
-                    "Batch rejected by hard integrity checks. "
-                    "No evaluation, retrain, or promotion performed."
-                ),
-            }
-
-        if not self.retrain_needed:
-            return {
-                "outcome": "no_retrain",
-                "retrain_needed": False,
-                "promoted": False,
-                "rmse_champion": float(self.rmse_champion_eval),
-                "integrity_warn": bool(self.integrity_warn),
-                "summary": (
-                    "Champion still healthy; no retrain triggered. "
-                    f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-                    f"(integrity_warn={self.integrity_warn})."
-                ),
-            }
-
-        if self.promoted:
-            return {
-                "outcome": "promoted",
-                "retrain_needed": True,
-                "promoted": True,
-                "candidate_version": str(self.candidate_version),
-                "rmse_champion": float(self.rmse_champion_eval),
-                "rmse_candidate": float(self.candidate_rmse),
-                "rmse_delta_pct": float(self.candidate_rmse_delta_pct),
-                "summary": (
-                    f"Candidate v{self.candidate_version} PROMOTED to @champion. "
-                    f"rmse_candidate={self.candidate_rmse:.4f} vs "
-                    f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-                    f"(delta={self.candidate_rmse_delta_pct:+.2f}%)."
-                ),
-            }
-
-        return {
-            "outcome": "candidate_rejected",
-            "retrain_needed": True,
-            "promoted": False,
-            "candidate_version": str(self.candidate_version),
-            "rmse_champion": float(self.rmse_champion_eval),
-            "rmse_candidate": float(self.candidate_rmse),
-            "rmse_delta_pct": float(self.candidate_rmse_delta_pct),
-            "summary": (
-                f"Candidate v{self.candidate_version} registered but REJECTED for promotion. "
-                f"rmse_candidate={self.candidate_rmse:.4f} vs "
-                f"rmse_champion={self.rmse_champion_eval:.4f} on batch_eval "
-                f"(delta={self.candidate_rmse_delta_pct:+.2f}%). "
-                "Champion alias unchanged."
-            ),
-        }
-
-    def _maybe_write_ui_result(self, result: dict) -> None:
-        if not self.ui_result_path:
-            return
-        path = Path(str(self.ui_result_path))
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(result, indent=2))
+        write_flow_result(str(self.ui_result_path) if self.ui_result_path else None, result)
 
 
 if __name__ == "__main__":
