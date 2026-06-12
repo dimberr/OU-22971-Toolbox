@@ -15,6 +15,8 @@ You are expected to learn on your own how to use:
 - **NannyML**: A library for model monitoring and drift detection.
 - **Giskard** (optional): A library for pre-deployment model testing.
 
+> **Windows note:** If Metaflow causes Windows compatibility issues, use one of the Linux-backed setup options in [metaflow_windows_options.md](./metaflow_windows_options.md).
+
 ---
 
 ## Problem description: Green Taxi tip prediction
