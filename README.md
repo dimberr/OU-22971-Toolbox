@@ -38,7 +38,7 @@ The emphasis is practical engineering ability, with supporting theoretical under
 - parallel training challenges: compute, memory, communication
 - performance analysis with PyTorch Profiler and Perfetto or Chrome trace viewing
 - distributed GPU training on managed cloud images
-- five parallelism dimensions: data, tensor, pipeline, context, expert
+- scaling strategies beyond DDP: data, tensor, pipeline, context, and expert parallelism
 
 
 ## Extra resources
@@ -50,4 +50,4 @@ The emphasis is practical engineering ability, with supporting theoretical under
 
 ## Maintenance
 
-Repo-wide maintenance scripts and helper runners live under [repo_maintenance/](repo_maintenance/README.md).
+Repo-wide maintenance tooling lives under [repo_maintenance/](repo_maintenance/README.md), including smoke-test validation, ignored-artifact cleanup, reproducible notebook HTML rendering, helper runners, and the grading Docker environment.

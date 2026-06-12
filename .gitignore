@@ -36,6 +36,7 @@ Ray/1_cluster_setup/head_workspace/*
 **/mlflow.db
 **/*.log
 **/run_logs
+exam_prep/
 
 # Python / notebook cache
 **/__pycache__/
@@ -46,9 +47,13 @@ Ray/1_cluster_setup/head_workspace/*
 test_logs/
 
 # Live unit material
-/Distributed_DL/5_parallelism_strategies/*
-!/Distributed_DL/5_parallelism_strategies/README.md
+/Distributed_DL/5_scaling_strategies/*
+!/Distributed_DL/5_scaling_strategies/README.md
 
-# Preserve bundled teaching assets and reference outputs.
-!Distributed_DL/4_ddp_on_cloud_gpus/runpod_output/*
-!Distributed_DL/4_ddp_on_cloud_gpus/colab_output/*
+# Preserve cloud GPU output logs while ignoring logs everywhere else.
+!Distributed_DL/4_ddp_on_cloud_gpus/runpod_output/
+!Distributed_DL/4_ddp_on_cloud_gpus/runpod_output/**/
+!Distributed_DL/4_ddp_on_cloud_gpus/runpod_output/**/*.log
+!Distributed_DL/4_ddp_on_cloud_gpus/colab_output/
+!Distributed_DL/4_ddp_on_cloud_gpus/colab_output/**/
+!Distributed_DL/4_ddp_on_cloud_gpus/colab_output/**/*.log
