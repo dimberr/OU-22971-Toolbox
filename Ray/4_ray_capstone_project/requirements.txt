@@ -1,0 +1,4 @@
+ray[default]==2.55.1
+pandas==2.3.3
+pyarrow==24.0.0
+pytest==9.1.1
