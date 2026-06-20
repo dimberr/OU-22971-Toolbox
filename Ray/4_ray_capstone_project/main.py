@@ -58,12 +58,33 @@ class ZoneActor:
         baseline_by_slot: dict[tuple[int, int], float],
         month_start: pd.Timestamp,
         tick_minutes: int = TICK_MINUTES,
+        withhold_fraction: float = 0.0,
+        arrival_delay_ticks: int = 0,
+        subactor_trigger: int = 0,
+        n_helpers: int = 3,
     ):
         self.zone_id = zone_id
         self.pickups_by_tick = pickups_by_tick
         self.baseline_by_slot = baseline_by_slot
         self.month_start = pd.Timestamp(month_start)
         self.tick_minutes = tick_minutes
+
+        # Stretch A: delayed arrivals. A fraction of each tick's demand is hidden
+        # and resurfaces (added) at tick T + arrival_delay_ticks.
+        self.withhold_fraction = withhold_fraction
+        self.arrival_delay_ticks = arrival_delay_ticks
+        self.pending_releases: dict[int, int] = {}
+        self.withheld_total = 0
+        self.released_total = 0
+
+        # Stretch B: adaptive load balancing. A repeat straggler (consecutive
+        # fallbacks) promotes itself by spawning n_helpers helper subactors.
+        self.subactor_trigger = subactor_trigger
+        self.n_helpers = n_helpers
+        self.consecutive_fallbacks = 0
+        self.promoted = False
+        self.helpers: list = []
+        self.subactor_ticks = 0
 
         self.active_tick_id: int | None = None
         self.accepted_decisions: dict[int, dict] = {}
@@ -82,11 +103,29 @@ class ZoneActor:
         tick_start = self.month_start + pd.Timedelta(minutes=tick_id * self.tick_minutes)
         return int(tick_start.hour), int(tick_start.dayofweek)
 
+    def _is_delayed(self) -> bool:
+        return self.withhold_fraction > 0 and self.arrival_delay_ticks > 0
+
+    def _visible_pickups(self, tick_id: int) -> int:
+        """Demand visible at this tick: this tick's true demand minus what we
+        withhold, plus any earlier-withheld demand scheduled to resurface now.
+        The resurfaced amount is additive, so the release tick is inflated."""
+        true = self.pickups_by_tick.get(tick_id, 0)
+        released = self.pending_releases.pop(tick_id, 0)
+        self.released_total += released
+        if not self._is_delayed() or true <= 0:
+            return true + released
+        withheld = int(true * self.withhold_fraction)
+        self.withheld_total += withheld
+        release_at = tick_id + self.arrival_delay_ticks
+        self.pending_releases[release_at] = self.pending_releases.get(release_at, 0) + withheld
+        return (true - withheld) + released
+
     def next_snapshot(self, tick_id: int) -> dict:
         """Mark this tick active and return the minimal snapshot the scoring task
         needs. Missing demand defaults to 0; a missing baseline defaults to 0.0."""
         self.active_tick_id = tick_id
-        current_pickups = self.pickups_by_tick.get(tick_id, 0)
+        current_pickups = self._visible_pickups(tick_id)
         baseline_pickups = self.baseline_by_slot.get(self._slot_for_tick(tick_id), 0.0)
         return {
             "zone_id": self.zone_id,
@@ -121,13 +160,26 @@ class ZoneActor:
             "duplicate_reports": self.duplicate_reports,
             "late_reports": self.late_reports,
             "fallbacks": self.fallbacks,
+            "withheld_total": self.withheld_total,
+            "released_total": self.released_total,
+            # Demand withheld so late it never resurfaced before the run ended.
+            "unreleased_total": sum(self.pending_releases.values()),
+            "promoted": int(self.promoted),
+            "subactor_ticks": self.subactor_ticks,
         }
+
+    def helper_handles(self) -> list:
+        """Expose this zone's helper subactors (empty until promoted). The driver
+        routes a promoted zone's scoring through these handles."""
+        return self.helpers
 
     def mark_tick_active(self, tick_id: int) -> None:
         """Open a tick for reporting. The actor only accepts reports for this id."""
         self.active_tick_id = tick_id
 
-    def report_decision(self, tick_id: int, decision: str, task_latency_s: float = 0.0) -> str:
+    def report_decision(
+        self, tick_id: int, decision: str, task_latency_s: float = 0.0, used_subactors: bool = False
+    ) -> str:
         """Async report path from the scoring task. Rejects (and counts) reports
         that are late (tick already finalized), inactive (not the open tick), or
         duplicate (already reported this tick)."""
@@ -140,6 +192,8 @@ class ZoneActor:
         self.reported_tick = tick_id
         self.reported_decision = decision
         self.reported_latency = task_latency_s
+        if used_subactors:
+            self.subactor_ticks += 1
         return "accepted"
 
     def has_report(self, tick_id: int) -> bool:
@@ -158,9 +212,12 @@ class ZoneActor:
                 "used_fallback": False,
                 "task_latency_s": self.reported_latency,
             }
+            self.consecutive_fallbacks = 0
         else:
             entry = {"decision": self._fallback_decision(), "used_fallback": True, "task_latency_s": None}
             self.fallbacks += 1
+            self.consecutive_fallbacks += 1
+            self._maybe_promote()
 
         self.accepted_decisions[tick_id] = entry
         self.last_decision = entry["decision"]
@@ -168,6 +225,15 @@ class ZoneActor:
         self.reported_decision = None
         self.reported_latency = None
         return entry
+
+    def _maybe_promote(self) -> None:
+        """A repeat straggler that has missed subactor_trigger ticks in a row
+        spawns its helper subactors once and becomes a dispatcher zone."""
+        if self.subactor_trigger <= 0 or self.promoted:
+            return
+        if self.consecutive_fallbacks >= self.subactor_trigger:
+            self.helpers = [ScoreHelper.remote() for _ in range(self.n_helpers)]
+            self.promoted = True
 
     def _fallback_decision(self) -> str:
         """previous_else_ok: reuse the last accepted decision, defaulting to OK on
@@ -220,6 +286,50 @@ def score_and_report(
         )
     )
     return result
+
+
+def split_int(total: int, k: int) -> list[int]:
+    """Split a non-negative integer into k parts that sum back to total."""
+    base, rem = divmod(total, k)
+    return [base + (1 if i < rem else 0) for i in range(k)]
+
+
+@ray.remote
+class ScoreHelper:
+    """Subactor owned by a promoted ZoneActor. Processes one shard of a tick's
+    demand, simulating heavy per-shard work via sleep, and returns its partial."""
+
+    def score_shard(self, shard_value: int, sleep_s: float) -> int:
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        return shard_value
+
+
+@ray.remote
+def score_with_helpers(
+    snapshot: dict, actor: ActorHandle, helpers: list, need_threshold: float, sleep_s: float
+) -> dict:
+    """Promoted-zone task: fan the tick's demand out as shards to the zone's
+    helper subactors (each sleeps sleep_s/len(helpers), in parallel), sum the
+    partials -> identical current_pickups -> identical decision, then report.
+    The fan-out runs in this task (not the actor) so actor methods stay poll-fast."""
+    start = time.perf_counter()
+    shards = split_int(int(snapshot["current_pickups"]), len(helpers))
+    per_helper_sleep = sleep_s / len(helpers) if sleep_s > 0 else 0.0
+    partial_refs = [
+        helper.score_shard.remote(shard, per_helper_sleep)
+        for helper, shard in zip(helpers, shards)
+    ]
+    current = sum(ray.get(partial_refs))
+    decision = decide(current, snapshot["baseline_pickups"], need_threshold)
+    latency = time.perf_counter() - start
+    ray.get(actor.report_decision.remote(snapshot["tick_id"], decision, latency, True))
+    return {
+        "zone_id": snapshot["zone_id"],
+        "tick_id": snapshot["tick_id"],
+        "decision": decision,
+        "task_latency_s": latency,
+    }
 
 
 def select_active_zones(reference_df: pd.DataFrame, n_zones: int) -> list[int]:
@@ -402,16 +512,40 @@ def build_zone_lookups(
     return pickups_by_tick, baseline_by_slot
 
 
-def create_actors(baseline: pd.DataFrame, replay: pd.DataFrame, metadata: dict) -> dict[int, ActorHandle]:
+def select_zone_delays(zone_ids: list[int], base_delay: int, spread: int, seed: int) -> dict[int, int]:
+    """Per-zone arrival delay. spread=0 gives every zone the same base delay (a
+    system-wide delay); spread>0 adds a seeded per-zone jitter, reproducible for
+    a given seed."""
+    rng = random.Random(seed)
+    return {
+        z: base_delay + (rng.randint(0, spread) if spread > 0 else 0)
+        for z in sorted(zone_ids)
+    }
+
+
+def create_actors(
+    baseline: pd.DataFrame, replay: pd.DataFrame, metadata: dict, args: argparse.Namespace
+) -> dict[int, ActorHandle]:
     """Create one ZoneActor per active zone, each owning its own replay partition
-    and baseline slice."""
+    and baseline slice, plus its (reproducible) delayed-arrival config."""
     month_start = pd.Period(metadata["replay_month"], "M").start_time
     tick_minutes = metadata["tick_minutes"]
+    zone_delays = select_zone_delays(
+        metadata["active_zones"], args.arrival_delay_ticks, args.delay_spread, args.seed
+    )
     actors = {}
     for zone_id in metadata["active_zones"]:
         pickups_by_tick, baseline_by_slot = build_zone_lookups(replay, baseline, zone_id)
         actors[zone_id] = ZoneActor.remote(
-            zone_id, pickups_by_tick, baseline_by_slot, month_start, tick_minutes
+            zone_id,
+            pickups_by_tick,
+            baseline_by_slot,
+            month_start,
+            tick_minutes,
+            withhold_fraction=args.withhold_fraction,
+            arrival_delay_ticks=zone_delays[zone_id],
+            subactor_trigger=args.subactor_trigger if args.use_subactors else 0,
+            n_helpers=args.n_helpers,
         )
     return actors
 
@@ -481,6 +615,12 @@ def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latenc
         "slow_zone_fraction": args.slow_zone_fraction,
         "slow_zone_sleep_s": args.slow_zone_sleep_s,
         "fallback_policy": args.fallback_policy,
+        "withhold_fraction": args.withhold_fraction,
+        "arrival_delay_ticks": args.arrival_delay_ticks,
+        "delay_spread": args.delay_spread,
+        "use_subactors": args.use_subactors,
+        "subactor_trigger": args.subactor_trigger,
+        "n_helpers": args.n_helpers,
         "slow_zones": sorted(slow_zones),
     }
     (output_dir / "run_config.json").write_text(json.dumps(run_config, indent=2))
@@ -495,6 +635,11 @@ def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latenc
         "late_reports": sum(c["late_reports"] for c in counters),
         "duplicate_reports": sum(c["duplicate_reports"] for c in counters),
         "fallbacks": sum(c["fallbacks"] for c in counters),
+        "withheld_total": sum(c["withheld_total"] for c in counters),
+        "released_total": sum(c["released_total"] for c in counters),
+        "unreleased_total": sum(c["unreleased_total"] for c in counters),
+        "promoted_zones": sum(c["promoted"] for c in counters),
+        "subactor_ticks": sum(c["subactor_ticks"] for c in counters),
         "ticks": tick_records,
     }
     (output_dir / "tick_summary.json").write_text(json.dumps(summary, indent=2))
@@ -524,7 +669,7 @@ def finalize_run(output_dir, args, mode, zone_ids, actors, slow_zones, tick_late
 
 def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
     baseline, replay, metadata = load_prepared(prepared_dir)
-    actors = create_actors(baseline, replay, metadata)
+    actors = create_actors(baseline, replay, metadata, args)
     zone_ids = metadata["active_zones"]
     n_ticks = resolve_tick_count(metadata, args.max_ticks)
     slow_zones = select_slow_zones(zone_ids, args.slow_zone_fraction, args.seed)
@@ -560,7 +705,18 @@ def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace)
     finalize_run(output_dir, args, "blocking", zone_ids, actors, slow_zones, tick_latencies, total_s)
 
 
-def submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args) -> None:
+def _scoring_ref(actors, zone_id, snapshot, sleep_s, args, helpers_by_zone):
+    """A promoted zone fans out to its helper subactors; everyone else uses the
+    normal single scoring task."""
+    helpers = helpers_by_zone.get(zone_id)
+    if helpers:
+        return score_with_helpers.remote(
+            snapshot, actors[zone_id], helpers, args.need_threshold, sleep_s
+        )
+    return score_and_report.remote(snapshot, actors[zone_id], args.need_threshold, sleep_s)
+
+
+def submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args, helpers_by_zone) -> None:
     """Submit async scoring tasks while keeping at most max_inflight_zones in
     flight (ray.wait throttles submission). Tasks report straight to actors."""
     pending = []
@@ -568,9 +724,19 @@ def submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args) -> Non
         if len(pending) >= args.max_inflight_zones:
             _, pending = ray.wait(pending, num_returns=1)
         sleep_s = args.slow_zone_sleep_s if zone_id in slow_zones else 0.0
-        pending.append(
-            score_and_report.remote(snapshot, actors[zone_id], args.need_threshold, sleep_s)
-        )
+        pending.append(_scoring_ref(actors, zone_id, snapshot, sleep_s, args, helpers_by_zone))
+
+
+def refresh_promotions(actors, slow_zones, helpers_by_zone) -> None:
+    """After a tick, pick up helper handles for any slow zone that just promoted
+    itself, so subsequent ticks route through its subactors."""
+    pending_zones = [z for z in slow_zones if z not in helpers_by_zone]
+    if not pending_zones:
+        return
+    handles = ray.get([actors[z].helper_handles.remote() for z in pending_zones])
+    for zone_id, helpers in zip(pending_zones, handles):
+        if helpers:
+            helpers_by_zone[zone_id] = helpers
 
 
 def poll_until_ready(actors, zone_ids, tick_id, args) -> None:
@@ -587,12 +753,13 @@ def poll_until_ready(actors, zone_ids, tick_id, args) -> None:
 
 def run_async(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
     baseline, replay, metadata = load_prepared(prepared_dir)
-    actors = create_actors(baseline, replay, metadata)
+    actors = create_actors(baseline, replay, metadata, args)
     zone_ids = metadata["active_zones"]
     n_ticks = resolve_tick_count(metadata, args.max_ticks)
     slow_zones = select_slow_zones(zone_ids, args.slow_zone_fraction, args.seed)
     print(f"async: {len(slow_zones)} slow zones {sorted(slow_zones)} sleep {args.slow_zone_sleep_s}s")
 
+    helpers_by_zone: dict[int, list] = {}
     tick_latencies = []
     run_start = time.perf_counter()
     for tick_id in range(n_ticks):
@@ -600,9 +767,11 @@ def run_async(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) ->
 
         ray.get([actors[z].mark_tick_active.remote(tick_id) for z in zone_ids])
         snapshots = ray.get([actors[z].next_snapshot.remote(tick_id) for z in zone_ids])
-        submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args)
+        submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args, helpers_by_zone)
         poll_until_ready(actors, zone_ids, tick_id, args)
         ray.get([actors[z].finalize_tick.remote(tick_id) for z in zone_ids])
+        if args.use_subactors:
+            refresh_promotions(actors, slow_zones, helpers_by_zone)
 
         tick_latencies.append(time.perf_counter() - tick_start)
 
@@ -648,6 +817,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--slow-zone-sleep-s", type=float, default=1.0)
     run.add_argument("--fallback-policy", default="previous_else_ok")
     run.add_argument("--need-threshold", type=float, default=NEED_THRESHOLD)
+    run.add_argument("--withhold-fraction", type=float, default=0.0)
+    run.add_argument("--arrival-delay-ticks", type=int, default=0)
+    run.add_argument("--delay-spread", type=int, default=0)
+    run.add_argument("--use-subactors", action="store_true")
+    run.add_argument("--subactor-trigger", type=int, default=3)
+    run.add_argument("--n-helpers", type=int, default=3)
     run.add_argument("--max-ticks", type=int, default=96)
     run.add_argument("--seed", type=int, default=0)
     run.add_argument("--ray-address", default=None)
