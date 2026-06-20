@@ -1,0 +1,40 @@
+# Virtual Ray cluster: 1 head + 3 workers, each capped at 1 CPU (4 logical
+# CPUs total). The CPU cap keeps the stress test bounded and makes the
+# straggler effect visible. The project folder is bind-mounted at /app so the
+# code + prepared assets are shared and run artifacts persist back to the host.
+
+x-ray-common: &ray-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: ray-capstone:2.55.1-py313
+  working_dir: /app
+  shm_size: "1gb"
+  volumes:
+    - ..:/app
+
+services:
+  ray-head:
+    <<: *ray-common
+    container_name: ray-head
+    command: >
+      ray start --head --num-cpus 1 --dashboard-host 0.0.0.0 --port 6379 --block
+    ports:
+      - "8265:8265"   # dashboard + job submission API
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+
+  ray-worker:
+    <<: *ray-common
+    command: >
+      bash -c 'until ray start --address=ray-head:6379 --num-cpus 1 --block; do
+      echo "waiting for head..."; sleep 2; done'
+    depends_on:
+      - ray-head
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          cpus: "1"

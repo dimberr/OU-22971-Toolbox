@@ -70,6 +70,7 @@ class ZoneActor:
 
         self.reported_tick: int | None = None
         self.reported_decision: str | None = None
+        self.reported_latency: float | None = None
         self.last_decision: str | None = None
         self.duplicate_reports = 0
         self.late_reports = 0
@@ -94,7 +95,9 @@ class ZoneActor:
             "baseline_pickups": baseline_pickups,
         }
 
-    def write_decision(self, tick_id: int, decision: str, used_fallback: bool = False) -> bool:
+    def write_decision(
+        self, tick_id: int, decision: str, task_latency_s: float = 0.0, used_fallback: bool = False
+    ) -> bool:
         """Idempotent accepted-decision write keyed by tick_id. A duplicate write
         for an already-recorded tick is a safe no-op. Returns True if this call
         actually recorded the decision, False if it was a duplicate."""
@@ -103,7 +106,9 @@ class ZoneActor:
         self.accepted_decisions[tick_id] = {
             "decision": decision,
             "used_fallback": used_fallback,
+            "task_latency_s": task_latency_s,
         }
+        self.last_decision = decision
         return True
 
     def accepted(self) -> dict[int, dict]:
@@ -122,7 +127,7 @@ class ZoneActor:
         """Open a tick for reporting. The actor only accepts reports for this id."""
         self.active_tick_id = tick_id
 
-    def report_decision(self, tick_id: int, decision: str) -> str:
+    def report_decision(self, tick_id: int, decision: str, task_latency_s: float = 0.0) -> str:
         """Async report path from the scoring task. Rejects (and counts) reports
         that are late (tick already finalized), inactive (not the open tick), or
         duplicate (already reported this tick)."""
@@ -134,6 +139,7 @@ class ZoneActor:
             return "duplicate"
         self.reported_tick = tick_id
         self.reported_decision = decision
+        self.reported_latency = task_latency_s
         return "accepted"
 
     def has_report(self, tick_id: int) -> bool:
@@ -147,16 +153,21 @@ class ZoneActor:
             return self.accepted_decisions[tick_id]
 
         if self.reported_tick == tick_id and self.reported_decision is not None:
-            decision, used_fallback = self.reported_decision, False
+            entry = {
+                "decision": self.reported_decision,
+                "used_fallback": False,
+                "task_latency_s": self.reported_latency,
+            }
         else:
-            decision, used_fallback = self._fallback_decision(), True
+            entry = {"decision": self._fallback_decision(), "used_fallback": True, "task_latency_s": None}
             self.fallbacks += 1
 
-        self.accepted_decisions[tick_id] = {"decision": decision, "used_fallback": used_fallback}
-        self.last_decision = decision
+        self.accepted_decisions[tick_id] = entry
+        self.last_decision = entry["decision"]
         self.reported_tick = None
         self.reported_decision = None
-        return self.accepted_decisions[tick_id]
+        self.reported_latency = None
+        return entry
 
     def _fallback_decision(self) -> str:
         """previous_else_ok: reuse the last accepted decision, defaulting to OK on
@@ -203,7 +214,11 @@ def score_and_report(
     """Async-mode task: compute the decision and report it directly to the owning
     actor. A late report (tick already closed) is rejected by the actor."""
     result = run_score(snapshot, need_threshold, sleep_s)
-    ray.get(actor.report_decision.remote(result["tick_id"], result["decision"]))
+    ray.get(
+        actor.report_decision.remote(
+            result["tick_id"], result["decision"], result["task_latency_s"]
+        )
+    )
     return result
 
 
@@ -415,6 +430,98 @@ def select_slow_zones(zone_ids: list[int], slow_zone_fraction: float, seed: int)
     return set(rng.sample(sorted(zone_ids), n_slow))
 
 
+def build_tick_records(accepted_by_zone: dict[int, dict], tick_latencies: list[float]) -> list[dict]:
+    """Per-tick metrics derived from actor-owned accepted state plus the driver's
+    measured tick latencies. Fallback zones carry no task latency."""
+    records = []
+    for tick_id, tick_latency in enumerate(tick_latencies):
+        entries = [decisions[tick_id] for decisions in accepted_by_zone.values() if tick_id in decisions]
+        latencies = [
+            e["task_latency_s"] for e in entries
+            if not e["used_fallback"] and e["task_latency_s"] is not None
+        ]
+        mean_lat = sum(latencies) / len(latencies) if latencies else 0.0
+        max_lat = max(latencies) if latencies else 0.0
+        records.append(
+            {
+                "tick_id": tick_id,
+                "tick_latency_s": tick_latency,
+                "mean_zone_latency_s": mean_lat,
+                "max_zone_latency_s": max_lat,
+                "max_mean_ratio": (max_lat / mean_lat) if mean_lat > 0 else 0.0,
+                "zones_completed": sum(1 for e in entries if not e["used_fallback"]),
+                "zones_fallback": sum(1 for e in entries if e["used_fallback"]),
+                "need": sum(1 for e in entries if e["decision"] == "NEED"),
+                "ok": sum(1 for e in entries if e["decision"] == "OK"),
+            }
+        )
+    return records
+
+
+def build_latency_log(accepted_by_zone: dict[int, dict]) -> dict:
+    """Per-(tick, zone) task latency for completed reports."""
+    log: dict[str, dict] = {}
+    for zone_id, decisions in accepted_by_zone.items():
+        for tick_id, entry in decisions.items():
+            log.setdefault(str(tick_id), {})[str(zone_id)] = entry["task_latency_s"]
+    return log
+
+
+def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, counters, total_s) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    run_config = {
+        "mode": mode,
+        "seed": args.seed,
+        "need_threshold": args.need_threshold,
+        "max_ticks": args.max_ticks,
+        "max_inflight_zones": args.max_inflight_zones,
+        "tick_timeout_s": args.tick_timeout_s,
+        "completion_fraction": args.completion_fraction,
+        "slow_zone_fraction": args.slow_zone_fraction,
+        "slow_zone_sleep_s": args.slow_zone_sleep_s,
+        "fallback_policy": args.fallback_policy,
+        "slow_zones": sorted(slow_zones),
+    }
+    (output_dir / "run_config.json").write_text(json.dumps(run_config, indent=2))
+
+    pd.DataFrame(tick_records).to_csv(output_dir / "metrics.csv", index=False)
+    (output_dir / "latency_log.json").write_text(json.dumps(latency_log, indent=2))
+
+    summary = {
+        "mode": mode,
+        "n_ticks": len(tick_records),
+        "total_s": total_s,
+        "late_reports": sum(c["late_reports"] for c in counters),
+        "duplicate_reports": sum(c["duplicate_reports"] for c in counters),
+        "fallbacks": sum(c["fallbacks"] for c in counters),
+        "ticks": tick_records,
+    }
+    (output_dir / "tick_summary.json").write_text(json.dumps(summary, indent=2))
+
+
+def finalize_run(output_dir, args, mode, zone_ids, actors, slow_zones, tick_latencies, total_s) -> None:
+    """Collect actor state, build metrics, write the four artifacts, and print a
+    one-line summary. Shared by blocking and async so artifacts are identical."""
+    accepted_states = ray.get([actors[z].accepted.remote() for z in zone_ids])
+    counters = ray.get([actors[z].counters.remote() for z in zone_ids])
+    accepted_by_zone = dict(zip(zone_ids, accepted_states))
+
+    tick_records = build_tick_records(accepted_by_zone, tick_latencies)
+    latency_log = build_latency_log(accepted_by_zone)
+    write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, counters, total_s)
+
+    need = sum(r["need"] for r in tick_records)
+    decisions = sum(r["need"] + r["ok"] for r in tick_records)
+    totals = (sum(c["fallbacks"] for c in counters), sum(c["late_reports"] for c in counters),
+              sum(c["duplicate_reports"] for c in counters))
+    print(
+        f"{mode}: {len(tick_records)} ticks, {decisions} decisions ({need} NEED), "
+        f"total {total_s:.2f}s, mean tick {sum(tick_latencies) / len(tick_latencies) * 1000:.1f}ms, "
+        f"fallbacks={totals[0]} late={totals[1]} dup={totals[2]} -> {output_dir}"
+    )
+
+
 def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
     baseline, replay, metadata = load_prepared(prepared_dir)
     actors = create_actors(baseline, replay, metadata)
@@ -439,19 +546,18 @@ def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace)
         ]
         results = ray.get(result_refs)
         ray.get(
-            [actors[r["zone_id"]].write_decision.remote(r["tick_id"], r["decision"]) for r in results]
+            [
+                actors[r["zone_id"]].write_decision.remote(
+                    r["tick_id"], r["decision"], r["task_latency_s"]
+                )
+                for r in results
+            ]
         )
 
         tick_latencies.append(time.perf_counter() - tick_start)
 
     total_s = time.perf_counter() - run_start
-    accepted_states = ray.get([actors[z].accepted.remote() for z in zone_ids])
-    need = sum(1 for zone in accepted_states for d in zone.values() if d["decision"] == "NEED")
-    decisions = sum(len(zone) for zone in accepted_states)
-    print(
-        f"blocking: {n_ticks} ticks, {decisions} decisions ({need} NEED), "
-        f"total {total_s:.2f}s, mean tick {sum(tick_latencies) / n_ticks * 1000:.1f}ms"
-    )
+    finalize_run(output_dir, args, "blocking", zone_ids, actors, slow_zones, tick_latencies, total_s)
 
 
 def submit_scoring_bounded(actors, zone_ids, snapshots, slow_zones, args) -> None:
@@ -501,23 +607,20 @@ def run_async(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) ->
         tick_latencies.append(time.perf_counter() - tick_start)
 
     total_s = time.perf_counter() - run_start
-    accepted_states = ray.get([actors[z].accepted.remote() for z in zone_ids])
-    counters = ray.get([actors[z].counters.remote() for z in zone_ids])
-    need = sum(1 for zone in accepted_states for d in zone.values() if d["decision"] == "NEED")
-    fallbacks = sum(c["fallbacks"] for c in counters)
-    late = sum(c["late_reports"] for c in counters)
-    dup = sum(c["duplicate_reports"] for c in counters)
-    decisions = sum(len(zone) for zone in accepted_states)
-    print(
-        f"async: {n_ticks} ticks, {decisions} decisions ({need} NEED), "
-        f"total {total_s:.2f}s, mean tick {sum(tick_latencies) / n_ticks * 1000:.1f}ms, "
-        f"fallbacks={fallbacks} late={late} dup={dup}"
-    )
+    finalize_run(output_dir, args, "async", zone_ids, actors, slow_zones, tick_latencies, total_s)
 
 
 def run_stress(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
-    # TODO: Reuse the async path with harsher skew settings.
-    pass
+    """Reuse the async controller under aggressively harsher skew: more slow
+    zones, longer stalls. The async path should still progress via fallbacks
+    while a blocking run on the same settings would degrade sharply."""
+    args.slow_zone_fraction = max(args.slow_zone_fraction, 0.5)
+    args.slow_zone_sleep_s = max(args.slow_zone_sleep_s, 3.0)
+    print(
+        f"stress: escalated skew -> fraction={args.slow_zone_fraction} "
+        f"sleep={args.slow_zone_sleep_s}s"
+    )
+    run_async(prepared_dir, output_dir, args)
 
 
 def build_parser() -> argparse.ArgumentParser:
