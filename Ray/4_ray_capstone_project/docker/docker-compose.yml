@@ -1,7 +1,17 @@
-# Virtual Ray cluster: 1 head + 3 workers, each capped at 1 CPU (4 logical
-# CPUs total). The CPU cap keeps the stress test bounded and makes the
-# straggler effect visible. The project folder is bind-mounted at /app so the
-# code + prepared assets are shared and run artifacts persist back to the host.
+# Virtual Ray cluster: 1 head (num-cpus 0, so it runs only the dashboard/driver
+# and never hosts actors) + 2 workers capped at 1 CPU each. The CPU cap keeps the
+# stress test bounded and makes the straggler effect visible. The project folder
+# is bind-mounted at /app so the code + prepared assets are shared and run
+# artifacts persist back to the host.
+#
+# Memory caps, sized from observed `docker stats`: head uses ~3.3g warm (heavy
+# ray[default] dashboard), workers idle ~330MB but climb with actors/helpers.
+# These `memory` values are hard cgroup caps (limits, NOT reservations), so the
+# sum may exceed the VM - what matters is that actual peak usage stays under the
+# ~7.75GB Docker Desktop VM. head 6g (margin over 3.3g) + 2 workers x 2g (room
+# for 15 ZoneActors + ScoreHelpers under the subactor demo) + ui 0.5g. Each cap
+# also makes Ray read the per-container limit instead of the whole VM, so a
+# runaway is bounded to one container instead of OOM-killing a raylet VM-wide.
 
 x-ray-common: &ray-common
   build:
@@ -10,31 +20,59 @@ x-ray-common: &ray-common
   image: ray-capstone:2.55.1-py313
   working_dir: /app
   shm_size: "1gb"
+  # With per-container `memory` caps below, Ray now reads each node's own cgroup
+  # limit (not the whole VM) and the caps prevent the cluster from exhausting the
+  # VM. We still disable Ray's monitor so a transient spike near the cap triggers
+  # graceful kernel behavior bounded to one container rather than the monitor
+  # killing our driver/actors mid-run. Re-enable (drop this var) if you want
+  # Ray's graceful per-node OOM handling now that it reads the right limit.
+  environment:
+    - RAY_memory_monitor_refresh_ms=0
   volumes:
     - ..:/app
+    - ../../TLC_Data:/tlc-data:ro
 
 services:
   ray-head:
     <<: *ray-common
     container_name: ray-head
     command: >
-      ray start --head --num-cpus 1 --dashboard-host 0.0.0.0 --port 6379 --block
+      ray start --head --num-cpus 0 --object-store-memory 256000000
+      --dashboard-host 0.0.0.0 --port 6379 --block
     ports:
       - "8265:8265"   # dashboard + job submission API
     deploy:
       resources:
         limits:
           cpus: "1"
+          memory: "6g"
 
   ray-worker:
     <<: *ray-common
     command: >
-      bash -c 'until ray start --address=ray-head:6379 --num-cpus 1 --block; do
+      bash -c 'until ray start --address=ray-head:6379 --num-cpus 1
+      --object-store-memory 256000000 --block; do
       echo "waiting for head..."; sleep 2; done'
     depends_on:
       - ray-head
     deploy:
-      replicas: 3
+      replicas: 2
       resources:
         limits:
           cpus: "1"
+          memory: "2g"
+
+  capstone-ui:
+    <<: *ray-common
+    container_name: ray-capstone-ui
+    command: >
+      python web_app.py --host 0.0.0.0 --port 8080 --ray-address http://ray-head:8265
+    ports:
+      - "8080:8080"   # interactive capstone console
+    depends_on:
+      - ray-head
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: "512m"

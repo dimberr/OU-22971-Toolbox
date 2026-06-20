@@ -550,10 +550,13 @@ def create_actors(
     return actors
 
 
-def resolve_tick_count(metadata: dict, max_ticks: int | None) -> int:
-    """Cap the replay window so demos and skew runs stay tractable."""
+def resolve_tick_range(metadata: dict, start_tick: int, max_ticks: int | None) -> range:
+    """Resolve the replay window so demos can target a specific time slice."""
     n_ticks = metadata["n_ticks"]
-    return min(n_ticks, max_ticks) if max_ticks else n_ticks
+    if start_tick < 0 or start_tick >= n_ticks:
+        raise ValueError(f"start_tick must be in [0, {n_ticks - 1}], got {start_tick}")
+    end_tick = min(n_ticks, start_tick + max_ticks) if max_ticks else n_ticks
+    return range(start_tick, end_tick)
 
 
 def select_slow_zones(zone_ids: list[int], slow_zone_fraction: float, seed: int) -> set[int]:
@@ -564,11 +567,13 @@ def select_slow_zones(zone_ids: list[int], slow_zone_fraction: float, seed: int)
     return set(rng.sample(sorted(zone_ids), n_slow))
 
 
-def build_tick_records(accepted_by_zone: dict[int, dict], tick_latencies: list[float]) -> list[dict]:
+def build_tick_records(
+    accepted_by_zone: dict[int, dict], tick_ids: list[int], tick_latencies: list[float]
+) -> list[dict]:
     """Per-tick metrics derived from actor-owned accepted state plus the driver's
     measured tick latencies. Fallback zones carry no task latency."""
     records = []
-    for tick_id, tick_latency in enumerate(tick_latencies):
+    for tick_id, tick_latency in zip(tick_ids, tick_latencies):
         entries = [decisions[tick_id] for decisions in accepted_by_zone.values() if tick_id in decisions]
         latencies = [
             e["task_latency_s"] for e in entries
@@ -608,6 +613,7 @@ def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latenc
         "mode": mode,
         "seed": args.seed,
         "need_threshold": args.need_threshold,
+        "start_tick": args.start_tick,
         "max_ticks": args.max_ticks,
         "max_inflight_zones": args.max_inflight_zones,
         "tick_timeout_s": args.tick_timeout_s,
@@ -645,14 +651,14 @@ def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latenc
     (output_dir / "tick_summary.json").write_text(json.dumps(summary, indent=2))
 
 
-def finalize_run(output_dir, args, mode, zone_ids, actors, slow_zones, tick_latencies, total_s) -> None:
+def finalize_run(output_dir, args, mode, zone_ids, actors, slow_zones, tick_ids, tick_latencies, total_s) -> None:
     """Collect actor state, build metrics, write the four artifacts, and print a
     one-line summary. Shared by blocking and async so artifacts are identical."""
     accepted_states = ray.get([actors[z].accepted.remote() for z in zone_ids])
     counters = ray.get([actors[z].counters.remote() for z in zone_ids])
     accepted_by_zone = dict(zip(zone_ids, accepted_states))
 
-    tick_records = build_tick_records(accepted_by_zone, tick_latencies)
+    tick_records = build_tick_records(accepted_by_zone, tick_ids, tick_latencies)
     latency_log = build_latency_log(accepted_by_zone)
     write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, counters, total_s)
 
@@ -671,13 +677,14 @@ def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace)
     baseline, replay, metadata = load_prepared(prepared_dir)
     actors = create_actors(baseline, replay, metadata, args)
     zone_ids = metadata["active_zones"]
-    n_ticks = resolve_tick_count(metadata, args.max_ticks)
+    tick_range = resolve_tick_range(metadata, args.start_tick, args.max_ticks)
     slow_zones = select_slow_zones(zone_ids, args.slow_zone_fraction, args.seed)
     print(f"blocking: {len(slow_zones)} slow zones {sorted(slow_zones)} sleep {args.slow_zone_sleep_s}s")
 
+    tick_ids = []
     tick_latencies = []
     run_start = time.perf_counter()
-    for tick_id in range(n_ticks):
+    for tick_id in tick_range:
         tick_start = time.perf_counter()
 
         snapshots = ray.get([actors[z].next_snapshot.remote(tick_id) for z in zone_ids])
@@ -699,10 +706,11 @@ def run_blocking(prepared_dir: Path, output_dir: Path, args: argparse.Namespace)
             ]
         )
 
+        tick_ids.append(tick_id)
         tick_latencies.append(time.perf_counter() - tick_start)
 
     total_s = time.perf_counter() - run_start
-    finalize_run(output_dir, args, "blocking", zone_ids, actors, slow_zones, tick_latencies, total_s)
+    finalize_run(output_dir, args, "blocking", zone_ids, actors, slow_zones, tick_ids, tick_latencies, total_s)
 
 
 def _scoring_ref(actors, zone_id, snapshot, sleep_s, args, helpers_by_zone):
@@ -755,14 +763,15 @@ def run_async(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) ->
     baseline, replay, metadata = load_prepared(prepared_dir)
     actors = create_actors(baseline, replay, metadata, args)
     zone_ids = metadata["active_zones"]
-    n_ticks = resolve_tick_count(metadata, args.max_ticks)
+    tick_range = resolve_tick_range(metadata, args.start_tick, args.max_ticks)
     slow_zones = select_slow_zones(zone_ids, args.slow_zone_fraction, args.seed)
     print(f"async: {len(slow_zones)} slow zones {sorted(slow_zones)} sleep {args.slow_zone_sleep_s}s")
 
     helpers_by_zone: dict[int, list] = {}
+    tick_ids = []
     tick_latencies = []
     run_start = time.perf_counter()
-    for tick_id in range(n_ticks):
+    for tick_id in tick_range:
         tick_start = time.perf_counter()
 
         ray.get([actors[z].mark_tick_active.remote(tick_id) for z in zone_ids])
@@ -773,10 +782,11 @@ def run_async(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) ->
         if args.use_subactors:
             refresh_promotions(actors, slow_zones, helpers_by_zone)
 
+        tick_ids.append(tick_id)
         tick_latencies.append(time.perf_counter() - tick_start)
 
     total_s = time.perf_counter() - run_start
-    finalize_run(output_dir, args, "async", zone_ids, actors, slow_zones, tick_latencies, total_s)
+    finalize_run(output_dir, args, "async", zone_ids, actors, slow_zones, tick_ids, tick_latencies, total_s)
 
 
 def run_stress(prepared_dir: Path, output_dir: Path, args: argparse.Namespace) -> None:
@@ -823,6 +833,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--use-subactors", action="store_true")
     run.add_argument("--subactor-trigger", type=int, default=3)
     run.add_argument("--n-helpers", type=int, default=3)
+    run.add_argument("--start-tick", type=int, default=0)
     run.add_argument("--max-ticks", type=int, default=96)
     run.add_argument("--seed", type=int, default=0)
     run.add_argument("--ray-address", default=None)
