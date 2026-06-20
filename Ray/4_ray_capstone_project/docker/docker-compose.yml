@@ -1,17 +1,15 @@
 # Virtual Ray cluster: 1 head (num-cpus 0, so it runs only the dashboard/driver
-# and never hosts actors) + 2 workers capped at 1 CPU each. The CPU cap keeps the
-# stress test bounded and makes the straggler effect visible. The project folder
-# is bind-mounted at /app so the code + prepared assets are shared and run
+# and never hosts actors) + 2 workers exposing 6 CPUs each (12 schedulable total).
+# Sized for a 14-CPU / 12GB Docker Desktop VM. 12 schedulable CPUs let every slow
+# zone's scoring task run in parallel, so blocking tick latency cleanly tracks the
+# slowest zone (not CPU serialization) and async's timeout can beat it. The project
+# folder is bind-mounted at /app so the code + prepared assets are shared and run
 # artifacts persist back to the host.
 #
-# Memory caps, sized from observed `docker stats`: head uses ~3.3g warm (heavy
-# ray[default] dashboard), workers idle ~330MB but climb with actors/helpers.
-# These `memory` values are hard cgroup caps (limits, NOT reservations), so the
-# sum may exceed the VM - what matters is that actual peak usage stays under the
-# ~7.75GB Docker Desktop VM. head 6g (margin over 3.3g) + 2 workers x 2g (room
-# for 15 ZoneActors + ScoreHelpers under the subactor demo) + ui 0.5g. Each cap
-# also makes Ray read the per-container limit instead of the whole VM, so a
-# runaway is bounded to one container instead of OOM-killing a raylet VM-wide.
+# Memory caps are hard cgroup limits (NOT reservations), sized for the 12GB VM:
+# head 4g (heavy ray[default] dashboard, ~3.3g warm) + 2 workers x 3g + ui 0.5g.
+# Each cap also makes Ray read the per-container limit instead of the whole VM, so
+# a runaway is bounded to one container instead of OOM-killing a raylet VM-wide.
 
 x-ray-common: &ray-common
   build:
@@ -45,12 +43,12 @@ services:
       resources:
         limits:
           cpus: "1"
-          memory: "6g"
+          memory: "4g"
 
   ray-worker:
     <<: *ray-common
     command: >
-      bash -c 'until ray start --address=ray-head:6379 --num-cpus 1
+      bash -c 'until ray start --address=ray-head:6379 --num-cpus 6
       --object-store-memory 256000000 --block; do
       echo "waiting for head..."; sleep 2; done'
     depends_on:
@@ -59,8 +57,8 @@ services:
       replicas: 2
       resources:
         limits:
-          cpus: "1"
-          memory: "2g"
+          cpus: "6"
+          memory: "3g"
 
   capstone-ui:
     <<: *ray-common

@@ -606,7 +606,20 @@ def build_latency_log(accepted_by_zone: dict[int, dict]) -> dict:
     return log
 
 
-def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, counters, total_s) -> None:
+def build_decision_log(accepted_by_zone: dict[int, dict]) -> dict:
+    """Per-(tick, zone) accepted decision (OK/NEED) and whether it was a
+    fallback, so consumers can render the operational decision per zone."""
+    log: dict[str, dict] = {}
+    for zone_id, decisions in accepted_by_zone.items():
+        for tick_id, entry in decisions.items():
+            log.setdefault(str(tick_id), {})[str(zone_id)] = {
+                "decision": entry["decision"],
+                "used_fallback": entry["used_fallback"],
+            }
+    return log
+
+
+def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, decision_log, counters, total_s) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     run_config = {
@@ -633,6 +646,7 @@ def write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latenc
 
     pd.DataFrame(tick_records).to_csv(output_dir / "metrics.csv", index=False)
     (output_dir / "latency_log.json").write_text(json.dumps(latency_log, indent=2))
+    (output_dir / "decision_log.json").write_text(json.dumps(decision_log, indent=2))
 
     summary = {
         "mode": mode,
@@ -660,7 +674,10 @@ def finalize_run(output_dir, args, mode, zone_ids, actors, slow_zones, tick_ids,
 
     tick_records = build_tick_records(accepted_by_zone, tick_ids, tick_latencies)
     latency_log = build_latency_log(accepted_by_zone)
-    write_run_artifacts(output_dir, args, mode, slow_zones, tick_records, latency_log, counters, total_s)
+    decision_log = build_decision_log(accepted_by_zone)
+    write_run_artifacts(
+        output_dir, args, mode, slow_zones, tick_records, latency_log, decision_log, counters, total_s
+    )
 
     need = sum(r["need"] for r in tick_records)
     decisions = sum(r["need"] + r["ok"] for r in tick_records)

@@ -33,7 +33,7 @@ PRESETS: list[dict[str, Any]] = [
         "description": "Waits for every zone. Tick latency follows the slowest selected zones.",
         "label": "blocking",
         "mode": "blocking",
-        "params": {"max_ticks": 20, "slow_zone_fraction": 0.25, "slow_zone_sleep_s": 1.0},
+        "params": {"start_tick": 32, "max_ticks": 48, "slow_zone_fraction": 0.25, "slow_zone_sleep_s": 1.0},
     },
     {
         "id": "async",
@@ -42,7 +42,8 @@ PRESETS: list[dict[str, Any]] = [
         "label": "async",
         "mode": "async",
         "params": {
-            "max_ticks": 20,
+            "start_tick": 32,
+            "max_ticks": 48,
             "slow_zone_fraction": 0.25,
             "slow_zone_sleep_s": 1.0,
             "completion_fraction": 0.75,
@@ -52,10 +53,10 @@ PRESETS: list[dict[str, Any]] = [
     {
         "id": "stress",
         "title": "Async Stress",
-        "description": "Escalates skew internally and demonstrates forward progress via fallbacks.",
+        "description": "Escalates skew: slow-zone-sleep-s>=3.0 + slow-zone-fraction>=0.5. completion-fraction (0.75) closes a tick once 6 of 8 zones report - normally the 6 fast zones alone. But with half the zones now slow, only 4 are fast, so the quorum can't be met without stragglers: each tick must wait for slow zones, hits the 2s timeout (< 3s stalls), and falls back. Higher runtime = harsher skew, not a regression.",
         "label": "stress",
         "mode": "stress",
-        "params": {"max_ticks": 20},
+        "params": {"start_tick": 32, "max_ticks": 48},
     },
     {
         "id": "blocking_harsh",
@@ -63,7 +64,15 @@ PRESETS: list[dict[str, Any]] = [
         "description": "Same harsh skew as stress, but blocking waits for the slowest zones.",
         "label": "blocking_harsh",
         "mode": "blocking",
-        "params": {"max_ticks": 20, "slow_zone_fraction": 0.5, "slow_zone_sleep_s": 3.0},
+        "params": {"start_tick": 32, "max_ticks": 48, "slow_zone_fraction": 0.5, "slow_zone_sleep_s": 3.0},
+    },
+    {
+        "id": "async_harsh",
+        "title": "Async Harsh Skew",
+        "description": "Same 3s skew as blocking_harsh, but timeout (1s) < sleep and a low quorum keep ticks ~1s via fallbacks. Pair with Blocking Harsh Skew to show the gap.",
+        "label": "async_harsh",
+        "mode": "stress",
+        "params": {"start_tick": 32, "max_ticks": 48, "tick_timeout_s": 1.0, "completion_fraction": 0.5},
     },
     {
         "id": "delay",
@@ -71,7 +80,7 @@ PRESETS: list[dict[str, Any]] = [
         "description": "Withholds demand and releases it later to show decision mis-timing.",
         "label": "delay",
         "mode": "blocking",
-        "params": {"max_ticks": 96, "withhold_fraction": 0.5, "arrival_delay_ticks": 3},
+        "params": {"start_tick": 32, "max_ticks": 48, "withhold_fraction": 0.5, "arrival_delay_ticks": 3},
     },
     {
         "id": "subactors",
@@ -80,7 +89,8 @@ PRESETS: list[dict[str, Any]] = [
         "label": "subactors",
         "mode": "async",
         "params": {
-            "max_ticks": 12,
+            "start_tick": 32,
+            "max_ticks": 48,
             "slow_zone_fraction": 0.25,
             "slow_zone_sleep_s": 1.5,
             "tick_timeout_s": 1.0,
@@ -233,12 +243,14 @@ def load_run(path: Path) -> dict[str, Any] | None:
     if not all((path / name).exists() for name in required):
         return None
     metrics = pd.read_csv(path / "metrics.csv").to_dict("records")
+    decision_path = path / "decision_log.json"
     return {
         "label": path.name,
         "config": read_json(path / "run_config.json"),
         "summary": compact_summary(read_json(path / "tick_summary.json")),
         "metrics": metrics,
         "latencyLog": read_json(path / "latency_log.json"),
+        "decisionLog": read_json(decision_path) if decision_path.exists() else {},
     }
 
 
@@ -910,7 +922,7 @@ let STATE = null;
 let chartMetric = "tick_latency_s";
 let heatRun = null;
 let mapRun = null;
-let mapMetric = "pickups";
+let mapMetric = "decision";
 let mapTickIndex = 0;
 let playTimer = null;
 let customFormRendered = false;
@@ -1057,7 +1069,8 @@ function renderSummary() {
       <div class="label">${escapeHtml(run.label)} | ${escapeHtml(run.config.mode)}</div>
       <div class="value">${fmt(s.total_s)}s</div>
       <p>start tick ${run.config.start_tick || 0} | ${s.n_ticks} ticks | fallbacks ${s.fallbacks} | late ${s.late_reports}</p>
-      <p>withheld ${s.withheld_total} | released ${s.released_total} | subactor ticks ${s.subactor_ticks}</p>
+      <p>withheld ${s.withheld_total} | released ${s.released_total} | unreleased ${s.unreleased_total ?? 0}</p>
+      <p>promoted zones ${s.promoted_zones ?? 0} | subactor ticks ${s.subactor_ticks}</p>
     </article>`;
   }).join("");
 }
@@ -1096,23 +1109,51 @@ function renderMetricTabs() {
 }
 
 function lineChart(id, field) {
-  const width = 920, height = 270, pad = 36;
-  const xmax = Math.max(1, ...STATE.runs.flatMap(run => run.metrics.map(row => Number(row.tick_id))));
+  const width = 940, height = 300;
+  const m = { left: 54, right: 18, top: 22, bottom: 42 };
+  const plotW = width - m.left - m.right;
+  const plotH = height - m.top - m.bottom;
+  const allTicks = STATE.runs.flatMap(run => run.metrics.map(row => Number(row.tick_id)));
+  const xmin = Math.min(...allTicks);
+  const xmax = Math.max(...allTicks) > xmin ? Math.max(...allTicks) : xmin + 1;
   const ymax = Math.max(1, ...STATE.runs.flatMap(run => run.metrics.map(row => Number(row[field] || 0))));
-  const x = value => pad + (Number(value) / xmax) * (width - pad * 2);
-  const y = value => height - pad - (Number(value || 0) / ymax) * (height - pad * 2);
+  const x = v => m.left + ((Number(v) - xmin) / (xmax - xmin)) * plotW;
+  const y = v => m.top + plotH - (Number(v || 0) / ymax) * plotH;
   const colors = ["#b45309", "#0f766e", "#1d4ed8", "#b91c1c", "#6d28d9", "#475569"];
-  const lines = STATE.runs.map((run, i) => {
-    const points = run.metrics.map(row => `${x(row.tick_id)},${y(row[field])}`).join(" ");
-    return `<polyline points="${points}" fill="none" stroke="${colors[i % colors.length]}" stroke-width="3"/>`;
-  }).join("");
+  const lines = STATE.runs.map((run, i) =>
+    `<polyline points="${run.metrics.map(row => `${x(row.tick_id)},${y(row[field])}`).join(" ")}" fill="none" stroke="${colors[i % colors.length]}" stroke-width="2.5"/>`
+  ).join("");
+  const title = (METRICS.find(([key]) => key === field) || [field, field])[1];
   const legend = STATE.runs.map((run, i) => `<span class="pill"><span class="dot" style="background:${colors[i % colors.length]}"></span>${escapeHtml(run.label)}</span>`).join("");
-  document.getElementById(id).innerHTML = `<svg viewBox="0 0 ${width} ${height}">
-    <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#9a9186"/>
-    <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#9a9186"/>
-    <text x="${pad}" y="22" fill="#667085" font-size="12">max ${fmt(ymax)}</text>
-    ${lines}
+  document.getElementById(id).innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img">
+    ${chartGridY(ymax, m, plotW, plotH, y)}${chartGridX(xmin, xmax, m, plotH, x)}${lines}
+    <text x="${m.left + plotW / 2}" y="${height - 6}" text-anchor="middle" fill="#667085" font-size="12">tick</text>
+    <text transform="translate(14 ${m.top + plotH / 2}) rotate(-90)" text-anchor="middle" fill="#667085" font-size="12">${escapeHtml(title)}</text>
   </svg><div class="status" style="justify-content:flex-start">${legend}</div>`;
+}
+
+function chartTicks(min, max, count) {
+  const step = (max - min) / count;
+  return Array.from({ length: count + 1 }, (_, i) => min + step * i);
+}
+
+function chartGridY(ymax, m, plotW, plotH, y) {
+  return chartTicks(0, ymax, 4).map(v => {
+    const yy = y(v);
+    return `<line x1="${m.left}" y1="${yy}" x2="${m.left + plotW}" y2="${yy}" stroke="rgba(31,41,51,0.10)"/>`
+      + `<text x="${m.left - 6}" y="${yy + 4}" text-anchor="end" fill="#667085" font-size="11">${fmt(v)}</text>`;
+  }).join("");
+}
+
+function chartGridX(xmin, xmax, m, plotH, x) {
+  const baseline = m.top + plotH;
+  const count = Math.min(8, Math.max(1, xmax - xmin));
+  const seen = new Set();
+  return chartTicks(xmin, xmax, count).map(v => Math.round(v)).filter(t => !seen.has(t) && seen.add(t)).map(tick => {
+    const xx = x(tick);
+    return `<line x1="${xx}" y1="${m.top}" x2="${xx}" y2="${baseline}" stroke="rgba(31,41,51,0.05)"/>`
+      + `<text x="${xx}" y="${baseline + 16}" text-anchor="middle" fill="#667085" font-size="11">${tick}</text>`;
+  }).join("");
 }
 
 function renderHeatmap() {
@@ -1131,16 +1172,31 @@ function renderHeatmap() {
 function drawHeatmap(run) {
   const zones = heatZones(run);
   const ticks = run.metrics.map(row => String(row.tick_id));
-  const cell = 18, left = 58, top = 24;
+  const cell = 18, left = 58, top = 30;
   const width = left + ticks.length * cell + 20;
   const height = top + zones.length * cell + 28;
   const maxLatency = maxLatencyFor(run);
   const labels = zones.map((zone, i) => `<text x="5" y="${top + i * cell + 13}" font-size="11" fill="#667085">${zone}</text>`).join("");
+  const tickLabels = ticks.map((tick, ti) => ti % 5 === 0
+    ? `<text x="${left + ti * cell + (cell - 1) / 2}" y="${top - 8}" text-anchor="middle" font-size="9" fill="#9a9186">${tick}</text>` : "").join("");
   const cells = zones.flatMap((zone, zi) => ticks.map((tick, ti) => {
     const value = (run.latencyLog[tick] || {})[zone];
     return `<rect x="${left + ti * cell}" y="${top + zi * cell}" width="${cell - 1}" height="${cell - 1}" fill="${heatColor(value, maxLatency)}"><title>zone ${zone}, tick ${tick}, latency ${latencyLabel(value)}</title></rect>`;
   })).join("");
-  document.getElementById("heatmap").innerHTML = `<svg viewBox="0 0 ${width} ${height}">${labels}${cells}</svg><p class="mini">Orange cells are fallback-finalized zones.</p>`;
+  document.getElementById("heatmap").innerHTML =
+    `<p class="mini">Rows are active zones (zone_id at left), columns are ticks. Cell color is that zone's task latency for the tick.</p>`
+    + `<svg viewBox="0 0 ${width} ${height}">${tickLabels}${labels}${cells}</svg>`
+    + heatLegend(maxLatency)
+    + `<p class="mini">Light = fast (near 0s); dark blue = slowest (~${fmt(maxLatency)}s), so the dark blue rows are the simulated slow zones. Orange = fallback-finalized, beige = no report emitted.</p>`;
+}
+
+function heatLegend(maxLatency) {
+  const stops = chartTicks(0, maxLatency, 4).map(v =>
+    `<span class="pill"><span class="dot" style="background:${heatColor(v, maxLatency)}"></span>${fmt(v)}s</span>`
+  ).join("");
+  const special = `<span class="pill"><span class="dot" style="background:#b45309"></span>fallback</span>`
+    + `<span class="pill"><span class="dot" style="background:#e8dfd1"></span>not emitted</span>`;
+  return `<div class="status" style="justify-content:flex-start">${stops}${special}</div>`;
 }
 
 function heatZones(run) {
@@ -1168,6 +1224,8 @@ function renderMap() {
   document.getElementById("mapControls").innerHTML = `
     <select onchange="mapRun=this.value; mapTickIndex=0; renderMap();">${runOptions}</select>
     <select onchange="mapMetric=this.value; renderMap();">
+      ${option("decision", "Decision (NEED = red)")}
+      ${option("mismatch", "Decision vs truth (delay)")}
       ${option("pickups", "Observed pickups")}
       ${option("ratio", "Observed / baseline")}
       ${option("latency", "Task latency")}
@@ -1179,6 +1237,14 @@ function renderMap() {
     <span id="mapTickLabel" class="pill"></span>`;
   document.getElementById("mapContent").innerHTML = `<div class="split"><div id="map" class="map"></div><div id="tip" class="tooltip">${escapeHtml(currentTipText())}</div></div>`;
   drawMap();
+}
+
+function mapHint() {
+  const hints = {
+    decision: " Red = NEED, teal = OK (per zone, per tick).",
+    mismatch: " Amber = missed spike (truth NEED, run OK), purple = false alarm (truth OK, run NEED), light teal = agree. Truth uses raw pickups; run uses what was scored.",
+  };
+  return hints[mapMetric] || "";
 }
 
 function option(value, label) {
@@ -1197,7 +1263,7 @@ function drawMap() {
     .sort((a, b) => Number(activeZones.has(String(featureZoneId(a)))) - Number(activeZones.has(String(featureZoneId(b)))));
   const paths = features.map(feature => zonePath(feature, bounds, width, height, frame, run, activeZones)).join("");
   document.getElementById("map").innerHTML = `<svg viewBox="0 0 ${width} ${height}" aria-label="NYC TLC zone map">${paths}</svg>
-    <p class="mini">${activeZones.size} active zones highlighted over ${STATE.geometry.features.length} TLC zones.</p>`;
+    <p class="mini">${activeZones.size} active zones highlighted over ${STATE.geometry.features.length} TLC zones.${mapHint()}</p>`;
   document.getElementById("mapTickLabel").textContent = `tick ${frame.tick_id} | ${frame.time}`;
   syncTickSlider(frame.tick_id);
   updateTooltip(frame, run);
@@ -1275,6 +1341,8 @@ function zonePath(feature, bounds, width, height, frame, run, activeZones) {
 
 function mapColor(zoneId, frame, run) {
   const value = (frame.zones[zoneId] || {});
+  if (mapMetric === "decision") return decisionColor(decisionFor(run, frame, zoneId));
+  if (mapMetric === "mismatch") return mismatchColor(run, frame, zoneId);
   if (mapMetric === "fallback") return latencyFor(run, frame.tick_id, zoneId) === null ? "#b45309" : "#c7e6da";
   if (mapMetric === "slow") return (run && run.config.slow_zones || []).map(String).includes(zoneId) ? "#6d28d9" : "#e8dfd1";
   if (mapMetric === "latency") {
@@ -1319,7 +1387,10 @@ function zoneTip(zoneId, frame, run) {
   const zone = STATE.prepared.zones.find(item => String(item.zone_id) === zoneId) || { label: `Zone ${zoneId}` };
   const value = frame.zones[zoneId] || {};
   const latency = latencyFor(run, frame.tick_id, zoneId);
-  return `${zone.label}\nzone_id: ${zoneId}\ntick: ${frame.tick_id}\ntime: ${frame.time}\npickups: ${value.pickups ?? 0}\nbaseline: ${fmt(value.baseline)}\nratio: ${fmt(value.ratio)}\nlatency: ${latencyLabel(latency)}`;
+  const decision = decisionLabel(decisionFor(run, frame, zoneId));
+  const truth = truthDecision(run, frame, zoneId);
+  const mismatch = { missed: " [missed spike]", false: " [false alarm]" }[mismatchKind(run, frame, zoneId)] || "";
+  return `${zone.label}\nzone_id: ${zoneId}\ntick: ${frame.tick_id}\ntime: ${frame.time}\npickups: ${value.pickups ?? 0}\nbaseline: ${fmt(value.baseline)}\nratio: ${fmt(value.ratio)}\nlatency: ${latencyLabel(latency)}\ndecision: ${decision}\ntruth: ${truth}${mismatch}`;
 }
 
 function inactiveZoneTip(feature, zoneId) {
@@ -1397,6 +1468,53 @@ function ratioColor(value) {
   if (value >= 1.1) return "#b91c1c";
   if (value >= 0.8) return "#b45309";
   return "#0f766e";
+}
+
+function decisionFor(run, frame, zoneId) {
+  const logged = run && run.decisionLog && (run.decisionLog[String(frame.tick_id)] || {})[String(zoneId)];
+  if (logged) return { decision: logged.decision, usedFallback: logged.used_fallback, estimated: false };
+  const ratio = (frame.zones[zoneId] || {}).ratio;
+  const threshold = (run && run.config && run.config.need_threshold) || 1.1;
+  if (ratio === null || ratio === undefined) return { decision: "OK", usedFallback: false, estimated: true };
+  return { decision: ratio >= threshold ? "NEED" : "OK", usedFallback: false, estimated: true };
+}
+
+function decisionColor(info) {
+  if (!info || !info.decision) return "#e8dfd1";
+  return info.decision === "NEED" ? "#b91c1c" : "#0f766e";
+}
+
+function loggedDecision(run, frame, zoneId) {
+  const logged = run && run.decisionLog && (run.decisionLog[String(frame.tick_id)] || {})[String(zoneId)];
+  return logged ? logged.decision : undefined;
+}
+
+function truthDecision(run, frame, zoneId) {
+  const ratio = (frame.zones[zoneId] || {}).ratio;
+  const threshold = (run && run.config && run.config.need_threshold) || 1.1;
+  if (ratio === null || ratio === undefined) return "OK";
+  return ratio >= threshold ? "NEED" : "OK";
+}
+
+function mismatchKind(run, frame, zoneId) {
+  const logged = loggedDecision(run, frame, zoneId);
+  if (logged === undefined) return "unknown";
+  const truth = truthDecision(run, frame, zoneId);
+  if (truth === logged) return "agree";
+  return truth === "NEED" ? "missed" : "false";
+}
+
+function mismatchColor(run, frame, zoneId) {
+  const kinds = { unknown: "#e8dfd1", agree: "#c7e6da", missed: "#b45309", false: "#6d28d9" };
+  return kinds[mismatchKind(run, frame, zoneId)];
+}
+
+function decisionLabel(info) {
+  if (!info || !info.decision) return "n/a";
+  const tags = [];
+  if (info.usedFallback) tags.push("fallback");
+  if (info.estimated) tags.push("est");
+  return tags.length ? `${info.decision} (${tags.join(", ")})` : info.decision;
 }
 
 function firstRunLabel() {
