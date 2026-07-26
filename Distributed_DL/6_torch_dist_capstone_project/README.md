@@ -8,13 +8,24 @@ embedding quality.
 
 ## Architecture
 
-- Rank 0: Stage 0 replica A
-- Rank 1: Stage 1 replica A and local contrastive loss
-- Rank 2: Stage 0 replica B
-- Rank 3: Stage 1 replica B and local contrastive loss
-- Pair groups `(0, 1)` and `(2, 3)` transfer boundary activations and gradients.
-- Stage-0 group `(0, 2)` and Stage-1 group `(1, 3)` broadcast initial state and
-  average corresponding parameter gradients.
+Two concepts that look similar but are different:
+
+- A **pipeline replica** is one complete split model: Stage 0 + Stage 1.
+  - Replica A = pair ranks `(0, 1)`
+  - Replica B = pair ranks `(2, 3)`
+- A **stage replica group** keeps copies of the same stage aligned:
+  - Stage-0 group = ranks `(0, 2)`
+  - Stage-1 group = ranks `(1, 3)`
+
+Ownership:
+
+- Rank 0: Stage 0 of pipeline replica A
+- Rank 1: Stage 1 of pipeline replica A, plus local contrastive loss
+- Rank 2: Stage 0 of pipeline replica B
+- Rank 3: Stage 1 of pipeline replica B, plus local contrastive loss
+
+Pair groups transfer boundary activations and gradients. Stage groups broadcast
+initial state and average corresponding parameter gradients.
 
 Stage 0 contains the ResNet stem, `layer1`, and `layer2`. It produces a boundary
 activation shaped `N×128×28×28`. Stage 1 contains `layer3`, `layer4`, average
@@ -22,23 +33,25 @@ pooling, flattening, and a projection head that produces 128-dimensional
 embeddings.
 
 ```mermaid
-flowchart LR
-    subgraph A["Pipeline replica A"]
-        R0["Rank 0<br/>Stage 0<br/>stem + layer1 + layer2"]
-        R1["Rank 1<br/>Stage 1<br/>layer3 + layer4 + head + loss"]
-        R0 -->|"boundary activation X"| R1
-        R1 -.->|"boundary gradient dL/dX"| R0
+flowchart TB
+    subgraph Pair0["pair_group 0 = pipeline replica A"]
+        direction LR
+        R0["Rank 0<br/>Stage 0"]
+        R1["Rank 1<br/>Stage 1 + loss"]
+        R0 -->|"send X"| R1
+        R1 -.->|"return dL/dX"| R0
     end
 
-    subgraph B["Pipeline replica B"]
-        R2["Rank 2<br/>Stage 0<br/>stem + layer1 + layer2"]
-        R3["Rank 3<br/>Stage 1<br/>layer3 + layer4 + head + loss"]
-        R2 -->|"boundary activation X"| R3
-        R3 -.->|"boundary gradient dL/dX"| R2
+    subgraph Pair1["pair_group 1 = pipeline replica B"]
+        direction LR
+        R2["Rank 2<br/>Stage 0"]
+        R3["Rank 3<br/>Stage 1 + loss"]
+        R2 -->|"send X"| R3
+        R3 -.->|"return dL/dX"| R2
     end
 
-    R0 <-->|"Stage-0 group<br/>broadcast state + average gradients"| R2
-    R1 <-->|"Stage-1 group<br/>broadcast state + average gradients"| R3
+    R0 <-->|"stage0_group 0,2<br/>broadcast + grad average"| R2
+    R1 <-->|"stage1_group 1,3<br/>broadcast + gather + grad average"| R3
 ```
 
 One training step follows this sequence:
