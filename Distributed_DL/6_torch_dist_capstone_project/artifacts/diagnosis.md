@@ -1,32 +1,24 @@
-# Manual batch-size diagnosis (DevContainer rerun)
+# Manual batch-size diagnosis (DevContainer)
 
 The first step of each run is treated as warmup. Using the mean of steps 1 and
-2 from the DevContainer rerun:
+2:
 
-- Local batch 2, global batch 4: 3.47 images/s
-- Local batch 4, global batch 8: 3.68 images/s
-- Change: about +6%
+| local_batch_size | global_batch_size | warm images/s | warm step time |
+|---|---|---|---|
+| 2 | 4 | 3.47 | 1.15 s |
+| 4 | 8 | 3.68 | 2.18 s |
+| 8 | 16 | 3.72 | 4.31 s |
 
-Absolute throughput is much lower than the earlier host run because four CPU
-processes contend inside the container. The important systems observation is
-still visible in the traces.
+Selected configuration: local batch size 8, because it maximizes measured
+`images/s`. The gain from 4 to 8 is only about +1%, so returns are diminishing.
 
-## Process separation check
+## Waiting regions from batch-8 mean spans
 
-The four ranks are separate OS processes. Example PIDs from the batch-2 traces:
-
-- rank 0: pid 46929, Stage 0 spans only
-- rank 1: pid 46930, Stage 1 spans only
-- rank 2: pid 46931, Stage 0 spans only
-- rank 3: pid 46932, Stage 1 spans only
-
-## Waiting regions from batch-4 mean spans
-
-- Rank 0 `stage0_forward`: ~358 ms
-- Rank 0 `recv_boundary_grad`: ~868 ms
-- Rank 0 `stage0_backward`: ~933 ms
-- Rank 1 `recv_boundary`: ~393 ms
-- Rank 1 `stage1_forward`: ~209 ms
+- Rank 0 `stage0_forward`: ~725 ms
+- Rank 0 `recv_boundary_grad`: ~1707 ms
+- Rank 0 `stage0_backward`: ~1839 ms
+- Rank 1 `recv_boundary`: ~792 ms
+- Rank 1 `stage1_forward`: ~411 ms
 
 Interpretation:
 
@@ -34,12 +26,12 @@ Interpretation:
    computes the boundary activation.
 2. Rank 0 later blocks in `recv_boundary_grad` while Stage 1 finishes forward,
    gather, loss, and backward.
-3. Explicit send spans stay under 1 ms. Waiting and stage imbalance dominate.
+3. Explicit send spans stay near 1–2 ms. Waiting and stage imbalance dominate.
+4. Larger batches lengthen both useful compute and blocked receive time almost
+   proportionally, so throughput barely rises.
 
-## Batch-size decision
+## Decision
 
-Doubling local batch size roughly doubled step time, so images/s barely moved.
-Batch 4 is still acceptable as the follow-up configuration, but the evidence
-shows that on this contended CPU container a larger batch does not buy much
-throughput. The main systems finding is the pipeline bubble, not a large
-throughput win.
+Choose local batch size 8 for the maximum observed `images/s`. The practical
+systems finding is the persistent Stage-0-heavy pipeline bubble, not a large
+batch-size win under four-way CPU contention in the container.

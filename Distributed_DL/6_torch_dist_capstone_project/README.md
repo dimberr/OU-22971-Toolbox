@@ -57,7 +57,7 @@ torchrun --standalone --nproc_per_node=4 \
   --output-dir 6_torch_dist_capstone_project/artifacts/batch2
 ```
 
-Follow-up profiled run:
+Follow-up profiled runs:
 
 ```bash
 torchrun --standalone --nproc_per_node=4 \
@@ -66,6 +66,13 @@ torchrun --standalone --nproc_per_node=4 \
   --local-batch-size 4 \
   --profiler \
   --output-dir 6_torch_dist_capstone_project/artifacts/batch4
+
+torchrun --standalone --nproc_per_node=4 \
+  6_torch_dist_capstone_project/train_pipeline.py \
+  --steps 3 \
+  --local-batch-size 8 \
+  --profiler \
+  --output-dir 6_torch_dist_capstone_project/artifacts/batch8
 ```
 
 Summarize the named profiler spans:
@@ -76,6 +83,9 @@ python 6_torch_dist_capstone_project/summarize_traces.py \
 
 python 6_torch_dist_capstone_project/summarize_traces.py \
   6_torch_dist_capstone_project/artifacts/batch4
+
+python 6_torch_dist_capstone_project/summarize_traces.py \
+  6_torch_dist_capstone_project/artifacts/batch8
 ```
 
 Load any `trace_rank*.json` file into `chrome://tracing` or Perfetto to inspect
@@ -117,23 +127,24 @@ Each rank exports a Chrome trace containing the required named spans. Rank 0
 also saves `metrics.csv` and `run_config.json`. `summarize_traces.py` creates a
 compact span summary.
 
-Ignoring the first warmup step (DevContainer rerun):
+Ignoring the first warmup step (DevContainer):
 
 - Local batch 2, global batch 4: 3.47 images/s
 - Local batch 4, global batch 8: 3.68 images/s
-- Follow-up change: about +6%
+- Local batch 8, global batch 16: 3.72 images/s
 
-Absolute numbers are low because four CPU ranks contend in the container.
-Doubling batch size roughly doubled step time, so throughput barely moved. The
-systems finding is clearer in the traces than in the images/s delta: Stage 0 is
-heavier, odd ranks wait in `recv_boundary`, and even ranks later wait in
-`recv_boundary_grad`. Direct send spans stay tiny. See
-`artifacts/diagnosis.md`.
+Selected configuration: local batch size 8, which maximizes measured
+`images/s`. Absolute numbers are low because four CPU ranks contend in the
+container, and returns diminish: step time roughly scales with batch size, so
+throughput barely rises. The systems finding is clearer in the traces than in
+the images/s delta: Stage 0 is heavier, odd ranks wait in `recv_boundary`, and
+even ranks later wait in `recv_boundary_grad`. Direct send spans stay tiny. See
+`artifacts/diagnosis.md` and `artifacts/sweep_summary.csv`.
 
 To inspect all ranks together in Perfetto, open:
 
 ```text
-6_torch_dist_capstone_project/artifacts/batch4/trace_combined.json
+6_torch_dist_capstone_project/artifacts/batch8/trace_combined.json
 ```
 
 ## Demo checklist
@@ -146,5 +157,5 @@ For the video:
 4. Run the batch-2 command.
 5. Open one trace and identify compute, transfer, synchronization, and blocking
    receive spans.
-6. Show `sweep_summary.csv` and explain the batch-4 decision.
-7. Run or show the batch-4 result and compare throughput.
+6. Show `sweep_summary.csv` and explain the batch-8 decision.
+7. Compare batch-2, batch-4, and batch-8 throughput and waiting patterns.
