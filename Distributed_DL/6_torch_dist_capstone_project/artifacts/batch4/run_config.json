@@ -1,0 +1,9 @@
+{
+  "dataset_size": 128,
+  "seed": 42,
+  "local_batch_size": 4,
+  "global_batch_size": 8,
+  "steps": 3,
+  "world_size": 4,
+  "profiler": true
+}

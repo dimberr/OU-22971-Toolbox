@@ -26,6 +26,8 @@ Ray/1_cluster_setup/head_workspace/*
 **/artifacts/
 **/outputs/
 **/traces/
+!Distributed_DL/6_torch_dist_capstone_project/artifacts/
+!Distributed_DL/6_torch_dist_capstone_project/artifacts/**
 **/artifact.json
 **/classification_report.txt
 **/confusion_matrix.png
