@@ -21,6 +21,48 @@ activation shaped `N×128×28×28`. Stage 1 contains `layer3`, `layer4`, average
 pooling, flattening, and a projection head that produces 128-dimensional
 embeddings.
 
+```mermaid
+flowchart LR
+    subgraph A["Pipeline replica A"]
+        R0["Rank 0<br/>Stage 0<br/>stem + layer1 + layer2"]
+        R1["Rank 1<br/>Stage 1<br/>layer3 + layer4 + head + loss"]
+        R0 -->|"boundary activation X"| R1
+        R1 -.->|"boundary gradient dL/dX"| R0
+    end
+
+    subgraph B["Pipeline replica B"]
+        R2["Rank 2<br/>Stage 0<br/>stem + layer1 + layer2"]
+        R3["Rank 3<br/>Stage 1<br/>layer3 + layer4 + head + loss"]
+        R2 -->|"boundary activation X"| R3
+        R3 -.->|"boundary gradient dL/dX"| R2
+    end
+
+    R0 <-->|"Stage-0 group<br/>broadcast state + average gradients"| R2
+    R1 <-->|"Stage-1 group<br/>broadcast state + average gradients"| R3
+```
+
+One training step follows this sequence:
+
+```mermaid
+sequenceDiagram
+    participant S0 as Even rank / Stage 0
+    participant S1 as Odd rank / Stage 1
+    participant SG0 as Stage-0 replica group
+    participant SG1 as Stage-1 replica group
+
+    S0->>S0: Create two views per source image
+    S0->>S0: Stage-0 forward produces X
+    S0->>S1: Send boundary activation X
+    S1->>S1: Stage-1 forward, gather embeddings, calculate loss
+    S1->>S1: Backward calculates Stage-1 gradients and dL/dX
+    S1->>S0: Send boundary gradient dL/dX
+    S0->>S0: Continue Stage-0 backward
+    S0->>SG0: Average Stage-0 parameter gradients
+    S1->>SG1: Average Stage-1 parameter gradients
+    S0->>S0: Local optimizer step
+    S1->>S1: Local optimizer step
+```
+
 ## Setup
 
 Open the `Distributed_DL` devcontainer, then activate its environment:
