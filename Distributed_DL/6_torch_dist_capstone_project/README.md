@@ -27,6 +27,15 @@ Ownership:
 Pair groups transfer boundary activations and gradients. Stage groups broadcast
 initial state and average corresponding parameter gradients.
 
+Read the architecture by **rows** for complete pipeline replicas and by
+**columns** for replicas of the same stage:
+
+| Pipeline replica | Stage 0 | Pair communication | Stage 1 |
+|---|---|---|---|
+| A — `pair_group(0)` | **Rank 0** | `X →` and `dL/dX ←` | **Rank 1** + loss |
+| B — `pair_group(1)` | **Rank 2** | `X →` and `dL/dX ←` | **Rank 3** + loss |
+| Same-stage groups | `(0, 2)` broadcast + average gradients |  | `(1, 3)` broadcast + gather embeddings + average gradients |
+
 Stage 0 contains the ResNet stem, `layer1`, and `layer2`. It produces a boundary
 activation shaped `N×128×28×28`. Stage 1 contains `layer3`, `layer4`, average
 pooling, flattening, and a projection head that produces 128-dimensional
